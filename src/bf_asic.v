@@ -90,7 +90,7 @@ module bf_asic (
     wire       is_bstack_op = (op[2:1] == 2'b10);
     wire       is_io_op = (op[2:1] == 2'b11);
 
-    // If its sub, left, or in, thats just !add, !right, or !out
+    // If it's sub, left, or in, thats just !add, !right, or !out
     wire       op_plus = is_data_op && op[0];
     wire       op_move_right = is_ptr_op && op[0];
     wire       op_output = is_io_op && op[0];
@@ -107,7 +107,7 @@ module bf_asic (
             2'b00:   output_data = data_current;
             2'b01:   output_data = ptr[7:0];
             2'b10:   output_data = pc[7:0];
-            2'b11:   output_data = bstack[bstack_ptr][7:0];
+            2'b11:   output_data = (bstack_ptr > 0) ? bstack[bstack_ptr - 3'd1][7:0] : 8'h00;
             default: output_data = 8'h00;
         endcase
     end
@@ -146,7 +146,7 @@ module bf_asic (
     wire signed [10:0] ptr_offset_current = $signed({1'b0, ptr}) - $signed({1'b0, tape_base});
     wire signed [10:0] ptr_offset_next = $signed({1'b0, ptr_next}) - $signed({1'b0, tape_base});
 
-    wire [9:0] tape_min = tape_base - 10'd4;
+    wire [9:0] tape_min = (tape_base < 10'd4) ? 10'd0 : (tape_base - 10'd4);
     wire [9:0] tape_max = tape_base + 10'd4;
 
     wire need_data_low_next = (ptr_next < tape_min) && (tape_base >= 10'd4);
@@ -265,15 +265,19 @@ module bf_asic (
                             end
                             else begin
                                 // PUSH BRACKET - CONTINUE
-                                bstack[bstack_ptr] <= pc;
-                                bstack_ptr <= bstack_ptr + 3'd1;
-                                pc <= pc + 10'd1;
+                                if (bstack_ptr < 3'd7) begin  // Only push if stack not full
+                                    bstack[bstack_ptr] <= pc;
+                                    bstack_ptr <= bstack_ptr + 3'd1;
+                                end
+                                pc <= pc + 10'd1;  // Always advance PC
                             end
                         end
                         else if (op_closeb) begin
                             if (data_zero) begin
                                 // POP BRACKET - CONTINUE
-                                bstack_ptr <= bstack_ptr - 3'd1;
+                                if (bstack_ptr > 3'd0) begin
+                                    bstack_ptr <= bstack_ptr - 3'd1;
+                                end
                                 pc <= pc + 10'd1;
                             end
                             else begin
@@ -296,11 +300,14 @@ module bf_asic (
                     if (op_saved == `CLOSE) begin // ']'
                        // If we haven't started transmitting
                         if (!tx_busy && !tx_done) begin
-                            // Give the address of the matching '[' and pop
-                            tx_data <= bstack[bstack_ptr - 3'd1];
-                            pc <= bstack[bstack_ptr - 3'd1];  // Update PC to jump target
-                            bstack_ptr <= bstack_ptr - 3'd1;
-                            tx_start <= 1'b1;
+                            // Only pop if stack is not empty
+                            if (bstack_ptr > 0) begin
+                                tx_data <= bstack[bstack_ptr - 3'd1];
+                                pc <= bstack[bstack_ptr - 3'd1];  // Update PC to jump target
+                                bstack_ptr <= bstack_ptr - 3'd1;
+                                tx_start <= 1'b1;
+                            end
+                            // else: stack is empty, do not pop, could set error/irq here if desired
                         end
                         else if (tx_done) begin
                             tx_start <= 1'b0;
@@ -308,17 +315,20 @@ module bf_asic (
                             state <= STATE_EXEC;
                         end
                     end
-                    else begin // '['
-                          if(!rx_enable) begin
-                            bstack[bstack_ptr] <= pc;
-                            bstack_ptr <= bstack_ptr + 3'd1;
+                    else begin  // '['
+                        if (!rx_enable) begin
+                            if (bstack_ptr < 3'd7) begin  // Only push if stack not full
+                                bstack[bstack_ptr] <= pc;
+                                bstack_ptr <= bstack_ptr + 3'd1;
+                            end
                             rx_enable <= 1'b1;
-                          end else if (rx_done) begin
+                        end
+                        else if (rx_done) begin
                             pc <= rx_data;
                             rx_enable <= 1'b0;
                             irq_jump <= 1'b0;
                             state <= STATE_EXEC;
-                          end
+                        end
                     end
                 end
 
@@ -456,5 +466,4 @@ module bf_asic (
             endcase
         end
     end
-
 endmodule
