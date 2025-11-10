@@ -1,18 +1,10 @@
 /*
  * TRUE 1-CYCLE EXECUTION WITH INSTRUCTION VALID HANDSHAKING
- * 
+ *
  * Instead of run_pause, uses instr_valid signal from MCU
  * - MCU pulses instr_valid HIGH for one cycle when instruction is ready
  * - ASIC executes instruction on that cycle
  * - No IDLE state - always ready in EXEC
- * - Interrupts tell MCU to stop pulsing instr_valid
- * 
- * FIXED: data_current now updates automatically when ptr moves within cache
- * 
- * COMPATIBILITY: Verilog-2005 synthesizable
- *   - Uses always @(*) for combinational logic
- *   - No functions (replaced with combinational always blocks)
- *   - Compatible with all major synthesis tools
  */
 
 `define MINUS 3'b000
@@ -107,7 +99,7 @@ module bf_asic (
             2'b00:   output_data = data_current;
             2'b01:   output_data = ptr[7:0];
             2'b10:   output_data = pc[7:0];
-            2'b11:   output_data = (bstack_ptr > 0) ? bstack[bstack_ptr - 3'd1][7:0] : 8'h00;
+            2'b11:   output_data = (bstack_ptr > 0) ? bstack[bstack_ptr-3'd1][7:0] : 8'h00;
             default: output_data = 8'h00;
         endcase
     end
@@ -293,21 +285,20 @@ module bf_asic (
                             state <= STATE_WAIT_IO;
                         end
                     end
-                    // If instr_valid is LOW, just wait (no state change)
+                    // If instr_valid is LOW, just wait
                 end
 
                 STATE_WAIT_JUMP: begin
-                    if (op_saved == `CLOSE) begin // ']'
-                       // If we haven't started transmitting
+                    if (op_saved == `CLOSE) begin  // ']'
+                        // If we haven't started transmitting
                         if (!tx_busy && !tx_done) begin
                             // Only pop if stack is not empty
                             if (bstack_ptr > 0) begin
-                                tx_data <= bstack[bstack_ptr - 3'd1];
-                                pc <= bstack[bstack_ptr - 3'd1];  // Update PC to jump target
+                                tx_data <= bstack[bstack_ptr-3'd1];
+                                pc <= bstack[bstack_ptr-3'd1];  // Update PC to jump target
                                 bstack_ptr <= bstack_ptr - 3'd1;
                                 tx_start <= 1'b1;
                             end
-                            // else: stack is empty, do not pop, could set error/irq here if desired
                         end
                         else if (tx_done) begin
                             tx_start <= 1'b0;
@@ -364,7 +355,7 @@ module bf_asic (
                         spi_byte_idx <= 3'd0;
                         spi_write <= 1'b1;
                         if (tape_move_right) begin
-                            spi_base_addr <= {6'd0, tape_base} - 16'd4;
+                            spi_base_addr <= (tape_base < 10'd4) ? 16'd0 : ({6'd0, tape_base} - 16'd4);
                             spi_wdata <= l_tape_cache[0];
                         end
                         else begin
