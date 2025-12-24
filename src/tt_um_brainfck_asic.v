@@ -41,12 +41,12 @@ module tt_um_brainfck_asic (
   wire [7:0] inspect_data;
 
   // Output bus split between uo and uio
-  assign uo_out[7:4] = inspect_data[3:0];
+  assign uo_out[7:4]  = inspect_data[3:0];
   assign uio_out[7:4] = inspect_data[7:4];
 
   // Wire declarations for interrupts (must be before use)
   wire interrupt_jump;  // Jump interrupt to microcontroller
-  wire interrupt_io;    // I/O interrupt to microcontroller
+  wire interrupt_io;  // I/O interrupt to microcontroller
 
   // Interrupt for I/O operation or instruction jump.
   assign uo_out[3] = interrupt_jump;
@@ -92,7 +92,10 @@ module tt_um_brainfck_asic (
   //                              P | X X X X X X X X X | 
 
   // So we will transfer always:    | T T T T T X X X X | P
+  //                                | X X X X P R R R R | <<  
+
   //                         or:  P | X X X X T T T T T |
+  //                             >> | R R R R P X X X X |
 
   // transfer:      {l_cache[3:0], base_byte} or {base_byte , r_cache[3:0]}
   // receive:         [baseptr : base_ptr+4]  or  [baseptr-4 : baseptr]
@@ -150,9 +153,9 @@ module tt_um_brainfck_asic (
       .tx_busy (tx_busy),
 
       // UART/Serial RX interface (internal)
-      .rx_data  (rx_data),
+      .rx_data(rx_data),
       .rx_enable(rx_enable),
-      .rx_done  (rx_done),
+      .rx_done(rx_done),
       // SPI control interface (internal) 
       .spi_read(spi_start_read),
       .spi_write(spi_start_write),
