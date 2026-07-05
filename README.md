@@ -3,3 +3,4 @@
 # Tiny Tapeout Brainf*ck ASIC
 
 - [Read the documentation for project](docs/info.md)
+- [RP2350 host firmware](firmware/README.md)

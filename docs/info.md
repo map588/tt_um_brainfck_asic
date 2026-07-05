@@ -13,7 +13,7 @@ You can also include images in this folder and reference them in the markdown. E
 
 ![Module](bf_asic.svg "Module")
 
-The ASIC executes Brainfuck instructions using the RP2040 for user I/O and SPI "tape". Each 3-bit instruction is decoded into data operations (+/-), pointer operations (</>), I/O operations (,/.), or bracket operations ([/]).
+The ASIC executes Brainfuck instructions using the demo board's RP2350 for user I/O and SPI "tape". Each 3-bit instruction is decoded into data operations (+/-), pointer operations (</>), I/O operations (,/.), or bracket operations ([/]).
 
 The design features a 9-byte data cache with SPI RAM backend for the full 1024-byte tape. When the pointer moves beyond the cached window, the ASIC writes old data to SPI and fetches new data in 5-byte bursts.
 
@@ -32,9 +32,11 @@ Two interrupt signals notify the MCU: `interrupt_jump` for bracket operations re
 
 ## How to test
 
-- Write some BF (Like this echo loop ,\[.,\])
+- Flash the host firmware from [firmware/](https://github.com/map588/tt_um_brainfck_asic/tree/main/firmware) onto the demo board's RP2350 and open the board's USB serial port.
 
-- Use the following encoding to translate it to what the BF_ASIC can understand:
+- Paste Brainfuck source at the `bf>` prompt and end it with `!`. Anything that isn't one of the eight BF ops is ignored as a comment, and anything after the `!` is consumed as `,` input by the running program. When the program halts, the firmware resets the ASIC, zeroes the tape, and prompts again.
+
+- The firmware translates each op on the fly to the ASIC's 3-bit encoding:
     ```
     '-' => "000"
     '+' => "001"
@@ -45,20 +47,10 @@ Two interrupt signals notify the MCU: `interrupt_jump` for bracket operations re
     ',' => "110"
     '.' => "111"
     ```
-    Heres a python script to process .b files: [link](https://github.com/map588/tt_um_brainfck_asic/blob/main/utils/bf_to_pico.py)
 
-- Connect to the pico via UART for I/O
-
-- `++++++++++[>+++++++>++++++++++>+++<<<-]>++.>+.+++++++..+++.>++.<<+++++++++++++++.>.+++.------.--------.>+.>++++++++++.` 
-- > hello world!
+- `++++++++++[>+++++++>++++++++++>+++<<<-]>++.>+.+++++++..+++.>++.<<+++++++++++++++.>.+++.------.--------.>+.>++++++++++.!` 
+- > Hello World!
 
 ## External hardware
 
-- The TT I/O board including the RP2040 / RP2350
-
-- RP2xx0 with [this firmware](https://github.com/MichaelBell/spi-ram-emu/) 
-installed
-
-- A protoboard, wires, and patience
-
-Credit for SPI firmware: https://github.com/MichaelBell/spi-ram-emu
+- The Tiny Tapeout demo board (RP2350) running [the host firmware](https://github.com/map588/tt_um_brainfck_asic/tree/main/firmware): one core feeds instructions and services the I/O and bracket-jump interrupts, the other emulates the SPI RAM "tape".
