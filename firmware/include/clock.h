@@ -11,9 +11,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CLK_HZ_MIN 10u
-#define CLK_HZ_MAX 2000000u /* bit-banged serial and instr_valid are   \
-                               timed against this clock; keep <= 2 MHz */
+#define CLK_HZ_MIN 10u /* PWM clkdiv floor: clk_sys/(255*65536) ~ 9 Hz */
+/* Upper limit is clk_sys/2 (~75 MHz), checked at run time. The BF
+ * engine has its own, much lower limits (see commands.c). */
 #define CLK_STEP_MAX 65535u
 
 typedef enum { CLK_RUN, CLK_STEP } clk_mode_t;

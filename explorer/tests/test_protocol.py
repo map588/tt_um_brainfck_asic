@@ -61,3 +61,15 @@ def test_seven_seg():
     assert seven_seg(0x6D) == " _ \n|_ \n _| "
     assert seven_seg(0x00) == "   \n   \n    "
     assert seven_seg(0xFF) == " _ \n|_|\n|_|."
+
+
+def test_parse_hz():
+    from tt_explorer.app import parse_hz
+    assert parse_hz("440") == 440
+    assert parse_hz("32k") == 32_000
+    assert parse_hz("1.5M") == 1_500_000
+    assert parse_hz("200 kHz") == 200_000
+    assert parse_hz("2m") == 2_000_000
+    assert parse_hz("") is None
+    assert parse_hz("fast") is None
+    assert parse_hz("0") is None

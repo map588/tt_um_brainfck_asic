@@ -24,9 +24,12 @@
 #include "tt_pins.h"
 
 #define PROTO_VERSION 1u
-#define BF_MIN_HZ 50000u /* below this, feed_instr's interrupts-off  \
-                            window starves USB and the 200 ms        \
-                            handshake timeouts trip */
+#define BF_MIN_HZ 50000u   /* below this, feed_instr's interrupts-off \
+                              window starves USB and the 200 ms       \
+                              handshake timeouts trip */
+#define BF_MAX_HZ 2000000u /* above this, the MCU cannot bit-bang the \
+                              instr_valid pulse and serial links      \
+                              (and >= 500 kHz already bit-slips) */
 
 static int current_design = -1; /* -1 = none selected since boot */
 static bool bf_armed;
@@ -252,6 +255,8 @@ static const char *cmd_bf(int argc, char **argv) {
         return "need-clock";
     if (clk_hz < BF_MIN_HZ)
         return "too-slow";
+    if (clk_hz > BF_MAX_HZ)
+        return "too-fast";
     pins_bf();
     bf_armed = true;
     ui_driven = true; /* pins_bf drives the ui pins */
@@ -276,7 +281,7 @@ static const struct cmd {
 } cmds[] = {
     {"hello", cmd_hello, "hello              -> ok tt-explorer <ver> bf=<addr>"},
     {"status", cmd_status, "status             -> ok design= mode= freq= ui= uiod= bf="},
-    {"freq", cmd_freq, "freq <hz>          set clock 10..2000000, run mode"},
+    {"freq", cmd_freq, "freq <hz>          set clock, 10 Hz .. clk_sys/2"},
     {"stop", cmd_stop, "stop               park clock low, step mode"},
     {"step", cmd_step, "step [n]           n clock pulses (step mode only)"},
     {"resume", cmd_resume, "resume             back to run mode at last freq"},

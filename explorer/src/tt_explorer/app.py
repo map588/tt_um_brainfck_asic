@@ -32,8 +32,24 @@ from .widgets import (
     UoPanel,
 )
 
-MAX_HZ = 2_000_000
+MAX_HZ = 75_000_000  # clk_sys / 2, the firmware PWM ceiling
 BF_MAX_HZ = 200_000  # ASIC->MCU serial link bit-slips above this
+
+
+def parse_hz(text: str) -> int | None:
+    """'440' -> 440, '32k' -> 32000, '1.5M' -> 1500000."""
+    text = text.strip().replace(" ", "").removesuffix("Hz").removesuffix("hz")
+    scale = 1
+    if text and text[-1] in "kK":
+        scale, text = 1_000, text[:-1]
+    elif text and text[-1] in "mM":
+        scale, text = 1_000_000, text[:-1]
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    hz = int(round(value * scale))
+    return hz if hz > 0 else None
 
 
 class TTExplorerApp(App):
@@ -251,6 +267,16 @@ class TTExplorerApp(App):
             self.query_one(ClockPanel).set_steps(0)
         await self._refresh_status()
 
+    async def _set_freq_from_input(self) -> None:
+        text = self.query_one("#freq-input", Input).value
+        hz = parse_hz(text)
+        if hz is None:
+            self.query_one(ClockPanel).set_error(
+                f"cannot read {text!r} — try 440, 32k, or 1.5M")
+            return
+        await self._clock_send(f"freq {hz}")
+        await self._refresh_status()
+
     async def _do_step(self, n: int) -> None:
         reply = await self._clock_send(f"step {n}")
         if reply and reply.ok:
@@ -314,10 +340,7 @@ class TTExplorerApp(App):
             await self._clock_send("resume")
             await self._refresh_status()
         elif bid == "freq-set":
-            value = self.query_one("#freq-input", Input).value.strip()
-            if value.isdigit():
-                await self._clock_send(f"freq {value}")
-                await self._refresh_status()
+            await self._set_freq_from_input()
         elif bid.startswith("preset-"):
             await self._clock_send(f"freq {bid.removeprefix('preset-')}")
             await self._refresh_status()
@@ -330,9 +353,8 @@ class TTExplorerApp(App):
             if value:
                 await self.send(value)
                 event.input.value = ""
-        elif event.input.id == "freq-input" and value.isdigit():
-            await self._clock_send(f"freq {value}")
-            await self._refresh_status()
+        elif event.input.id == "freq-input":
+            await self._set_freq_from_input()
 
 
 def main() -> None:

@@ -18,16 +18,19 @@ uint32_t asic_clks_us(uint32_t n) {
 }
 
 bool asic_clk_set_hz(uint32_t hz, uint32_t *actual) {
-    if (hz < CLK_HZ_MIN || hz > CLK_HZ_MAX)
-        return false;
-
     /* The PWM wrap counter is 16 bits. Frequencies below
-     * clk_sys / 65536 (~2.3 kHz) need the clock divider. */
+     * clk_sys / 65536 (~2.3 kHz) need the clock divider. The top is
+     * clk_sys / 2 (wrap = 2); the true output frequency gets coarse
+     * near it and is reported back via *actual. */
     uint32_t sys = clock_get_hz(clk_sys);
+    if (hz < CLK_HZ_MIN || hz > sys / 2)
+        return false;
     uint32_t div = (uint32_t)(sys / ((uint64_t)hz * 65536u)) + 1u;
     if (div > 255u)
         return false; /* not reachable for hz >= CLK_HZ_MIN */
-    uint32_t wrap = sys / (div * hz);
+    /* Round the period UP so the true frequency never exceeds the
+     * request — a design's clock rating must not be overshot. */
+    uint32_t wrap = (sys / div + hz - 1u) / hz;
 
     uint slice = pwm_gpio_to_slice_num(TT_PIN_PROJ_CLK);
     pwm_set_enabled(slice, false);

@@ -281,7 +281,8 @@ class ClockPanel(Vertical):
     BORDER_TITLE = "clock"
 
     PRESETS = [(10, "10 Hz"), (1_000, "1 kHz"), (50_000, "50 kHz"),
-               (200_000, "200 kHz"), (2_000_000, "2 MHz")]
+               (200_000, "200 kHz"), (1_000_000, "1 MHz"),
+               (10_000_000, "10 MHz"), (50_000_000, "50 MHz")]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="clk-run"):
@@ -291,12 +292,12 @@ class ClockPanel(Vertical):
                 yield Button("■  Stop clock", id="clk-stop")
             with Horizontal(classes="clk-line"):
                 yield Label("set frequency:")
-                yield Input(placeholder="Hz", id="freq-input")
+                yield Input(placeholder="e.g. 440, 32k, 1.5M", id="freq-input")
                 yield Button("Set", id="freq-set")
                 for hz, label in self.PRESETS:
                     yield Button(label, id=f"preset-{hz}", classes="preset")
-            yield Label("BF programs need ≤ 200 kHz (serial link limit)",
-                        classes="hint")
+            yield Label("10 Hz – 75 MHz (PWM) · BF programs need ≤ 200 kHz "
+                        "(serial link limit)", classes="hint")
         with Vertical(id="clk-step"):
             with Horizontal(classes="clk-line"):
                 yield Static("⏸ STOPPED — single-step mode",

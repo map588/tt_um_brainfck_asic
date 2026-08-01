@@ -79,7 +79,7 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 |---|---|
 | `hello` | `ok tt-explorer 1 bf=448` — protocol version, BF mux address |
 | `status` | design, clock mode/freq, pin state (`uidrv=0` when ui is released) |
-| `freq <hz>` | free-running clock, 10 Hz – 2 MHz (PWM) |
+| `freq <hz>` | free-running clock, 10 Hz – clk_sys/2 (75 MHz). The reply is the true output frequency, rounded down so the request is never exceeded. |
 | `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
 | `design <n>` | safe pin profile, mux-select design n, reset pulse |
 | `reset [1\|0]` | pulse (no arg), assert, or release the project reset |
@@ -110,9 +110,8 @@ Configuration knobs:
 | Define | Where | Default | Notes |
 |---|---|---|---|
 | `BF_CLK_HZ` | `src/bf_main.c` | 200 kHz | bf_host clock; the silicon serial-link ceiling. |
-| `CLK_HZ_MAX` | `include/clock.h` | 2 MHz | Serial links and the `instr_valid` pulse are bit-banged against this clock. |
 | `BF_DESIGN_ADDR` | `include/board.h` | 448 | tt_um_brainfck_asic mux slot on ttsky25b; the FPGA sim ignores the mux. |
-| `BF_MIN_HZ` | `src/commands.c` | 50 kHz | tt_host `bf` refuses to run slower (USB starvation, handshake timeouts). |
+| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/commands.c` | 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
 | `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap — the ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO
