@@ -23,6 +23,7 @@ from .widgets import (
 )
 
 MAX_HZ = 2_000_000
+BF_MAX_HZ = 200_000  # ASIC->MCU serial link bit-slips above this
 
 
 class TTExplorerApp(App):
@@ -54,6 +55,7 @@ class TTExplorerApp(App):
         super().__init__()
         self._port_arg = port
         self.link: SerialLink | None = None
+        self._bf_addr: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -100,6 +102,7 @@ class TTExplorerApp(App):
         reply = await self.send("hello")
         if reply and reply.ok:
             hello = protocol.parse_hello(reply.payload)
+            self._bf_addr = hello["bf"]
             self.sub_title = f"{self.link.port} · fw v{hello['version']}"
         await self._refresh_status()
 
@@ -164,7 +167,8 @@ class TTExplorerApp(App):
         self.query_one(DetailPane).show(p)
         reply = await self.send(f"design {p.address}")
         if reply and reply.ok and p.clock_hz:
-            await self.send(f"freq {min(p.clock_hz, MAX_HZ)}")
+            cap = BF_MAX_HZ if p.address == self._bf_addr else MAX_HZ
+            await self.send(f"freq {min(p.clock_hz, cap)}")
         await self._refresh_status()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:

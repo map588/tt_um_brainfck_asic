@@ -28,6 +28,7 @@ class BfScreen(ModalScreen):
         super().__init__()
         self._link = link
         self._tail = ""
+        self._done = False
 
     def compose(self) -> ComposeResult:
         yield Static("BF session — keys go to the board, Ctrl+Q leaves",
@@ -38,12 +39,20 @@ class BfScreen(ModalScreen):
     def on_mount(self) -> None:
         self._link.set_raw_sink(self._on_chunk)
         self._link.write_raw("bf\n")
+        # _on_chunk runs as a plain asyncio callback, outside the
+        # Textual app context, so it cannot start timers itself.
+        self.set_interval(0.25, self._check_done)
+
+    def _check_done(self) -> None:
+        if self._done:
+            self._done = False
+            self.dismiss()
 
     def _on_chunk(self, text: str) -> None:
         self.query_one("#bf-log", RichLog).write(text)
         self._tail = (self._tail + text)[-96:]
         if _END.search(self._tail.replace("\r", "")):
-            self.set_timer(0.5, self.dismiss)
+            self._done = True
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
