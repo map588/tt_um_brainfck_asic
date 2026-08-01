@@ -35,6 +35,14 @@ static uint8_t tape[65536];
 
 static inline bool cs_high(void) { return gpio_get(PIN_SPI_CS); }
 
+/* False parks core 1 in its outer wait so it never drives MISO while a
+ * non-BF design owns the uio pins. The flag is only examined between
+ * transactions; the CS pull-up keeps the wait condition true when the
+ * BF design is not routed to the pads. */
+static volatile bool enabled;
+
+void spi_ram_set_enabled(bool on) { enabled = on; }
+
 /* Called from core 0 while the ASIC is held in reset (CS deasserted, so
  * core 1 is parked in its CS-high wait and never touches the array). */
 void spi_ram_clear(void) { memset(tape, 0, sizeof(tape)); }
@@ -73,7 +81,7 @@ static bool __not_in_flash_func(tx_byte)(uint8_t b) {
 
 void __not_in_flash_func(spi_ram_core1_entry)(void) {
     for (;;) {
-        while (cs_high())
+        while (!enabled || cs_high())
             tight_loop_contents();
 
         /* SCK level at CS-fall tells us whether the master will eat the

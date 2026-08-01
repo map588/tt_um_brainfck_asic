@@ -6,22 +6,49 @@ carrier built by the `fpga` workflow.
 
 ## What it does
 
-- **Core 0** — generates the ASIC clock (PWM on the demo board's project
-  clock pin), feeds the program one instruction at a time, mirrors the
-  ASIC's PC, answers `interrupt_jump` with the precomputed bracket-match
-  table, and bridges `,` / `.` to USB CDC (open the board's serial port in
-  any terminal).
+- **Core 0** — runs a line-based command protocol over USB CDC
+  (`src/commands.c`): select a shuttle design through the mux, set or
+  single-step the project clock, peek/poke the ui/uo/uio pins, and run
+  BF sessions on `tt_um_brainfck_asic` (`src/bf_run.c`: feeds the
+  program one instruction at a time, mirrors the ASIC's PC, answers
+  `interrupt_jump` with the precomputed bracket-match table, and
+  bridges `,` / `.` to the serial port).
 - **Core 1** — bit-banged 23LC1024-style SPI RAM slave: the 64 KiB tape
-  the ASIC pages its 9-byte cache against.
+  the ASIC pages its 9-byte cache against. Parked while a non-BF design
+  is selected.
 
-Programs are loaded at runtime over the same USB serial port: paste BF
-source at the `bf>` prompt and end it with `!`. Anything that isn't one
-of the eight BF ops is treated as a comment; anything typed after the
-`!` is consumed as `,` input by the running program. When the program
-halts the firmware resets the ASIC, zeroes the tape, and prompts again:
+## Command protocol
+
+One command per line; each command gets exactly one reply line,
+`ok [payload]` or `err <token>`. Informational lines start with `# `.
+Type `help` on the port for the list. The `../explorer` TUI speaks
+this protocol; a bare terminal (`tio`, `screen`) works too.
+
+| Command | Effect |
+|---|---|
+| `hello` | `ok tt-explorer 1 bf=448` — protocol version, BF mux address |
+| `status` | design, clock mode/freq, pin state |
+| `freq <hz>` | free-running clock, 10 Hz – 2 MHz (PWM) |
+| `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
+| `design <n>` | safe pin profile, mux-select design n, reset pulse |
+| `reset [1\|0]` | pulse (no arg), assert, or release the project reset |
+| `ui <hh>` / `uo` / `uio` | write ui_in, read uo_out / uio pads (hex byte) |
+| `uiod [hh]` / `uiow <hh>` | uio direction mask (1 = MCU drives) / output latch |
+| `bf` | interactive BF session (BF design + running clock required) |
+
+Measured on ttsky25b silicon (2026-08-01): BF runs are fully reliable
+at `freq 200000` and below. At 500 kHz+ the ASIC→MCU serial link
+returns bit-slipped data (e.g. 0x42 arrives as 0x21). Use 200 kHz for
+BF work until the link is debugged.
+
+A `bf` session works as before: paste BF source, end with `!`.
+Anything that is not one of the eight BF ops is a comment; anything
+after the `!` is consumed as `,` input by the running program:
 
 ```
-bf> paste program, end with '!'
+bf
+ok bf
+# paste program, end with '!'
 ,[.,]!hello
 ```
 
@@ -36,18 +63,19 @@ cmake -S . -B build -G Ninja -DPICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/14_
 cmake --build build
 ```
 
-Flash `build/bf_host.uf2` over BOOTSEL. The firmware waits for the USB
-serial port to open, prints the program, runs it, and prints a halt
-banner when the PC walks off the end.
+Flash `build/bf_host.uf2` over BOOTSEL (or `picotool load -f -x`).
+The firmware waits for the USB serial port to open, then serves the
+command protocol.
 
-Configuration knobs, all in `src/main.c`:
+Configuration knobs:
 
-| Define | Default | Notes |
-|---|---|---|
-| `ASIC_CLK_HZ` | 1 MHz | Keep ≤ ~2 MHz — serial links and the `instr_valid` pulse are bit-banged against this clock. |
-| `DESIGN_NUM` | 0 | Mux slot on real silicon (see the shuttle index); the FPGA sim ignores it. |
-| `WAIT_FOR_USB` | 1 | Hold boot until a terminal attaches. |
-| `MAX_OPS` | 1024 | Program size cap — the ASIC PC is 10 bits. |
+| Define | Where | Default | Notes |
+|---|---|---|---|
+| `CLK_HZ_MAX` | `include/clock.h` | 2 MHz | Serial links and the `instr_valid` pulse are bit-banged against this clock. |
+| `BF_DESIGN_ADDR` | `src/commands.c` | 448 | tt_um_brainfck_asic mux slot on ttsky25b; the FPGA sim ignores the mux. |
+| `BF_MIN_HZ` | `src/commands.c` | 50 kHz | `bf` refuses to run slower (USB starvation, handshake timeouts). |
+| `WAIT_FOR_USB` | `src/main.c` | 1 | Hold boot until a terminal attaches. |
+| `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap — the ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO
 map, see `include/tt_pins.h`).

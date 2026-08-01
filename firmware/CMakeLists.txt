@@ -14,6 +14,9 @@ pico_sdk_init()
 
 add_executable(bf_host
     src/main.c
+    src/bf_run.c
+    src/clock.c
+    src/commands.c
     src/spi_ram.c
 )
 
