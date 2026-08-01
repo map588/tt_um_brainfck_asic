@@ -30,6 +30,7 @@
 
 static int current_design = -1; /* -1 = none selected since boot */
 static bool bf_armed;
+static bool ui_driven = true; /* false: ui pins released for DIP/PMOD */
 static uint8_t ui_value;
 static uint8_t uio_dir_mask; /* 1 = MCU drives the pad */
 static uint8_t uio_out_value;
@@ -41,6 +42,7 @@ static char reply[96]; /* handlers put their "ok" payload here */
 static void apply_safe_profile(void) {
     pins_safe();
     bf_armed = false;
+    ui_driven = true; /* pins_safe drives the ui pins low */
     ui_value = 0;
     uio_dir_mask = 0;
     uio_out_value = 0;
@@ -87,9 +89,11 @@ static const char *cmd_hello(int argc, char **argv) {
 static const char *cmd_status(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    sprintf(reply, "design=%d mode=%s freq=%lu ui=%02x uiod=%02x bf=%d",
+    sprintf(reply,
+            "design=%d mode=%s freq=%lu ui=%02x uidrv=%d uiod=%02x bf=%d",
             current_design, clk_mode == CLK_RUN ? "run" : "step",
-            (unsigned long)clk_hz, ui_value, uio_dir_mask, bf_armed ? 1 : 0);
+            (unsigned long)clk_hz, ui_value, ui_driven ? 1 : 0,
+            uio_dir_mask, bf_armed ? 1 : 0);
     return NULL;
 }
 
@@ -164,12 +168,29 @@ static const char *cmd_reset(int argc, char **argv) {
     return "bad-arg";
 }
 
+/* The board wires the DIP switches and the PMOD to the same nets as
+ * the MCU's ui pins. `ui off` releases the pins so those sources can
+ * drive (the official firmware calls this ASIC_MANUAL_INPUTS). */
 static const char *cmd_ui(int argc, char **argv) {
+    if (argc == 1) { /* read the pad levels (useful when released) */
+        sprintf(reply, "%02x", read_byte(TT_GPIO_UI_BASE));
+        return NULL;
+    }
+    if (argc == 2 && !strcmp(argv[1], "off")) {
+        for (uint i = 0; i < 8; i++)
+            gpio_set_dir(TT_GPIO_UI_BASE + i, GPIO_IN);
+        ui_driven = false;
+        return NULL;
+    }
     uint8_t v;
     if (argc != 2 || !parse_hex8(argv[1], &v))
         return "bad-arg";
-    for (uint i = 0; i < 8; i++)
-        gpio_put(TT_GPIO_UI_BASE + i, (v >> i) & 1);
+    for (uint i = 0; i < 8; i++) {
+        uint p = TT_GPIO_UI_BASE + i;
+        gpio_put(p, (v >> i) & 1);
+        gpio_set_dir(p, GPIO_OUT);
+    }
+    ui_driven = true;
     ui_value = v;
     return NULL;
 }
@@ -233,6 +254,7 @@ static const char *cmd_bf(int argc, char **argv) {
         return "too-slow";
     pins_bf();
     bf_armed = true;
+    ui_driven = true; /* pins_bf drives the ui pins */
     printf("ok bf\n");
     const char *err = bf_run_session();
     /* Drain input the program did not consume (e.g. ',' bytes left
@@ -260,7 +282,7 @@ static const struct cmd {
     {"resume", cmd_resume, "resume             back to run mode at last freq"},
     {"design", cmd_design, "design <n>         select mux design 0..1023 + reset"},
     {"reset", cmd_reset, "reset [1|0]        pulse, or assert(1)/release(0) NRST"},
-    {"ui", cmd_ui, "ui <hh>            write ui_in byte"},
+    {"ui", cmd_ui, "ui <hh>|off|(none) drive ui_in, release for DIP/PMOD, read"},
     {"uo", cmd_uo, "uo                 read uo_out byte"},
     {"uio", cmd_uio, "uio                read uio pad levels"},
     {"uiod", cmd_uiod, "uiod [hh]          set/get uio dir mask, 1=MCU drives"},

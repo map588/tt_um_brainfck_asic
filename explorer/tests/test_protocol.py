@@ -32,11 +32,12 @@ def test_parse_hello():
 
 def test_parse_status():
     st = protocol.parse_status(
-        "design=448 mode=run freq=1000000 ui=0a uiod=f0 bf=1")
+        "design=448 mode=run freq=1000000 ui=0a uidrv=1 uiod=f0 bf=1")
     assert st["design"] == 448
     assert st["mode"] == "run"
     assert st["freq"] == 1000000
     assert st["ui"] == 0x0A
+    assert st["uidrv"] == 1
     assert st["uiod"] == 0xF0
     assert st["bf"] == 1
 

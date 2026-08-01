@@ -49,7 +49,7 @@ def parse_status(payload: str) -> dict:
     out: dict = {}
     for part in payload.split():
         key, _, value = part.partition("=")
-        if key in ("design", "freq", "bf"):
+        if key in ("design", "freq", "bf", "uidrv"):
             out[key] = int(value)
         elif key in ("ui", "uiod"):
             out[key] = int(value, 16)

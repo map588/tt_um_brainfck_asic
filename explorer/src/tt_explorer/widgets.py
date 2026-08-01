@@ -105,19 +105,39 @@ class ClockPanel(Vertical):
 
 
 class PinPanel(Vertical):
-    """ui_in toggles, uo_out readout, uio direction/value."""
+    """Pin control. Every board connector (DIP switches, 7-segment,
+    PMODs, headers, MCU) shares the same nets, so this panel manages
+    who drives:
+
+    - ui_in: the MCU drives the switches' value, or `release` frees
+      the pins so the DIP switches / PMOD can drive them.
+    - uo_out: always driven by the design; the 7-segment shows the
+      same byte.
+    - uio: the DESIGN controls its own side per pin (uio_oe). The
+      `out` toggle here sets only the MCU side — enable it only for
+      pins the selected design's pinout declares as its inputs.
+    """
 
     def compose(self) -> ComposeResult:
         yield Label("pins", classes="panel-title")
-        yield Label("ui_in (drive)")
+        with Horizontal(id="ui-head"):
+            yield Label("ui_in  bit 7 → 0")
+            yield Button("release", id="ui-mode")
         with Horizontal(id="ui-switches"):
             for i in range(7, -1, -1):
                 yield Switch(id=f"ui{i}")
+        yield Static("", id="ui-display")
         yield Static("uo_out: --", id="uo-display")
-        yield Static("uio:    --", id="uio-display")
-        with Horizontal():
-            yield Input(placeholder="uio dir hh", id="uiod-input")
-            yield Input(placeholder="uio val hh", id="uiow-input")
+        yield Label("uio   pin (design)      out val lvl", id="uio-caption")
+        for i in range(8):
+            with Horizontal(classes="uio-row"):
+                yield Label(str(i), classes="uio-bit")
+                yield Label("", id=f"uio-name{i}", classes="uio-name")
+                yield Switch(id=f"uiod{i}")
+                yield Switch(id=f"uiow{i}", disabled=True)
+                yield Static("○", id=f"uio-lvl{i}", classes="uio-lvl")
+
+    # -- reads --
 
     def ui_byte(self) -> int:
         v = 0
@@ -126,18 +146,68 @@ class PinPanel(Vertical):
                 v |= 1 << i
         return v
 
+    def uiod_mask(self) -> int:
+        v = 0
+        for i in range(8):
+            if self.query_one(f"#uiod{i}", Switch).value:
+                v |= 1 << i
+        return v
+
+    def uiow_byte(self) -> int:
+        v = 0
+        for i in range(8):
+            if self.query_one(f"#uiow{i}", Switch).value:
+                v |= 1 << i
+        return v
+
+    # -- updates --
+
     @staticmethod
     def _bits(value: int) -> str:
         return " ".join("●" if (value >> i) & 1 else "○"
                         for i in range(7, -1, -1))
+
+    def set_pinout(self, pinout: dict[str, str]) -> None:
+        """Show the selected design's own uio pin names."""
+        for i in range(8):
+            name = pinout.get(f"uio[{i}]", "") or ""
+            self.query_one(f"#uio-name{i}", Label).update(name[:18])
+
+    def set_ui_mode(self, driving: bool) -> None:
+        self.query_one("#ui-mode", Button).label = (
+            "release" if driving else "drive")
+        for i in range(8):
+            self.query_one(f"#ui{i}", Switch).disabled = not driving
+        self.query_one("#ui-display", Static).update(
+            "" if driving else "released — DIP/PMOD drive the pins")
+
+    def show_ui_levels(self, value: int) -> None:
+        self.query_one("#ui-display", Static).update(
+            f"pads:   {self._bits(value)}  0x{value:02x}")
 
     def show_uo(self, value: int) -> None:
         self.query_one("#uo-display", Static).update(
             f"uo_out: {self._bits(value)}  0x{value:02x}")
 
     def show_uio(self, value: int) -> None:
-        self.query_one("#uio-display", Static).update(
-            f"uio:    {self._bits(value)}  0x{value:02x}")
+        for i in range(8):
+            self.query_one(f"#uio-lvl{i}", Static).update(
+                "●" if (value >> i) & 1 else "○")
+
+    def sync_uiow_enable(self) -> None:
+        for i in range(8):
+            drives = self.query_one(f"#uiod{i}", Switch).value
+            self.query_one(f"#uiow{i}", Switch).disabled = not drives
+
+    def reset_for_design(self) -> None:
+        """Match the firmware's safe profile after a design switch."""
+        with self.prevent(Switch.Changed):
+            for i in range(8):
+                self.query_one(f"#ui{i}", Switch).value = False
+                self.query_one(f"#uiod{i}", Switch).value = False
+                self.query_one(f"#uiow{i}", Switch).value = False
+        self.sync_uiow_enable()
+        self.set_ui_mode(True)
 
 
 class ConsolePane(Vertical):

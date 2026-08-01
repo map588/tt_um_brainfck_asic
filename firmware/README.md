@@ -78,12 +78,13 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 | Command | Effect |
 |---|---|
 | `hello` | `ok tt-explorer 1 bf=448` — protocol version, BF mux address |
-| `status` | design, clock mode/freq, pin state |
+| `status` | design, clock mode/freq, pin state (`uidrv=0` when ui is released) |
 | `freq <hz>` | free-running clock, 10 Hz – 2 MHz (PWM) |
 | `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
 | `design <n>` | safe pin profile, mux-select design n, reset pulse |
 | `reset [1\|0]` | pulse (no arg), assert, or release the project reset |
-| `ui <hh>` / `uo` / `uio` | write ui_in, read uo_out / uio pads (hex byte) |
+| `ui <hh>` / `ui off` / `ui` | drive ui_in, release it for the DIP switches / PMOD, or read the pad levels |
+| `uo` / `uio` | read uo_out / uio pad levels (hex byte) |
 | `uiod [hh]` / `uiow <hh>` | uio direction mask (1 = MCU drives) / output latch |
 | `bf` | interactive BF session (BF design + running clock required) |
 

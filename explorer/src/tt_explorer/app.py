@@ -40,9 +40,19 @@ class TTExplorerApp(App):
     .panel-title { text-style: bold; }
     ConsolePane { height: 1fr; border: solid $accent; }
     #console-log { height: 1fr; }
-    #freq-input, #step-count, #uiod-input, #uiow-input { width: 12; }
+    #freq-input, #step-count { width: 12; }
     Switch { width: 5; }
     Button { min-width: 8; }
+    PinPanel Switch { border: none; height: 1; width: 4; padding: 0 1; }
+    PinPanel { height: auto; }
+    #ui-head { height: 1; }
+    #ui-mode { border: none; height: 1; min-width: 9; margin-left: 2; }
+    #ui-switches { height: 1; }
+    .uio-row { height: 1; }
+    .uio-bit { width: 3; color: $text-muted; }
+    .uio-name { width: 19; color: $text-muted; }
+    .uio-lvl { width: 3; }
+    #uio-caption { color: $text-muted; }
     """
 
     BINDINGS = [
@@ -56,6 +66,7 @@ class TTExplorerApp(App):
         self._port_arg = port
         self.link: SerialLink | None = None
         self._bf_addr: int | None = None
+        self._ui_driving = True
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -137,15 +148,18 @@ class TTExplorerApp(App):
             return
         if isinstance(self.screen, BfScreen):
             return
+        panel = self.query_one(PinPanel)
         try:
             reply = await link.request("uo", timeout=1.0)
             if reply.ok:
-                self.query_one(PinPanel).show_uo(
-                    protocol.parse_hex_byte(reply.payload))
+                panel.show_uo(protocol.parse_hex_byte(reply.payload))
             reply = await link.request("uio", timeout=1.0)
             if reply.ok:
-                self.query_one(PinPanel).show_uio(
-                    protocol.parse_hex_byte(reply.payload))
+                panel.show_uio(protocol.parse_hex_byte(reply.payload))
+            if not self._ui_driving:
+                reply = await link.request("ui", timeout=1.0)
+                if reply.ok:
+                    panel.show_ui_levels(protocol.parse_hex_byte(reply.payload))
         except (asyncio.TimeoutError, ValueError):
             pass
 
@@ -166,12 +180,31 @@ class TTExplorerApp(App):
         p: Project = event.project
         self.query_one(DetailPane).show(p)
         reply = await self.send(f"design {p.address}")
-        if reply and reply.ok and p.clock_hz:
-            cap = BF_MAX_HZ if p.address == self._bf_addr else MAX_HZ
-            await self.send(f"freq {min(p.clock_hz, cap)}")
+        if reply and reply.ok:
+            panel = self.query_one(PinPanel)
+            panel.set_pinout(p.pinout)
+            panel.reset_for_design()
+            self._ui_driving = True
+            if p.clock_hz:
+                cap = BF_MAX_HZ if p.address == self._bf_addr else MAX_HZ
+                await self.send(f"freq {min(p.clock_hz, cap)}")
         await self._refresh_status()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ui-mode":
+            panel = self.query_one(PinPanel)
+            if self._ui_driving:
+                reply = await self.send("ui off")
+                if reply and reply.ok:
+                    self._ui_driving = False
+                    panel.set_ui_mode(False)
+            else:
+                reply = await self.send(
+                    f"ui {protocol.hex_byte(panel.ui_byte())}")
+                if reply and reply.ok:
+                    self._ui_driving = True
+                    panel.set_ui_mode(True)
+            return
         if event.button.id == "freq-set":
             value = self.query_one("#freq-input", Input).value.strip()
             if value.isdigit():
@@ -189,9 +222,15 @@ class TTExplorerApp(App):
         await self._refresh_status()
 
     async def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id and event.switch.id.startswith("ui"):
-            byte = self.query_one(PinPanel).ui_byte()
-            await self.send(f"ui {protocol.hex_byte(byte)}")
+        sid = event.switch.id or ""
+        panel = self.query_one(PinPanel)
+        if sid.startswith("uiod"):
+            panel.sync_uiow_enable()
+            await self.send(f"uiod {protocol.hex_byte(panel.uiod_mask())}")
+        elif sid.startswith("uiow"):
+            await self.send(f"uiow {protocol.hex_byte(panel.uiow_byte())}")
+        elif sid.startswith("ui") and self._ui_driving:
+            await self.send(f"ui {protocol.hex_byte(panel.ui_byte())}")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
@@ -199,10 +238,6 @@ class TTExplorerApp(App):
             if value:
                 await self.send(value)
                 event.input.value = ""
-        elif event.input.id == "uiod-input" and value:
-            await self.send(f"uiod {value}")
-        elif event.input.id == "uiow-input" and value:
-            await self.send(f"uiow {value}")
         elif event.input.id == "freq-input" and value.isdigit():
             await self.send(f"freq {value}")
             await self._refresh_status()
