@@ -79,7 +79,7 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 |---|---|
 | `hello` | `ok tt-explorer 1 bf=448` — protocol version, BF mux address |
 | `status` | design, clock mode/freq, pin state (`uidrv=0` when ui is released) |
-| `freq <hz>` | free-running clock, 10 Hz – clk_sys/2 (75 MHz). The reply is the true output frequency, rounded down so the request is never exceeded. |
+| `freq <hz>` | free-running clock, 1 Hz – clk_sys/2 (75 MHz), made by PIO with one-sys-cycle resolution. The true output frequency never exceeds the request; the reply reports it. |
 | `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
 | `design <n>` | safe pin profile, mux-select design n, reset pulse |
 | `reset [1\|0]` | pulse (no arg), assert, or release the project reset |

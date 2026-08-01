@@ -30,7 +30,7 @@ foreach(target bf_host tt_host)
     target_link_libraries(${target}
         pico_stdlib
         pico_multicore
-        hardware_pwm
+        hardware_pio
     )
     pico_enable_stdio_usb(${target} 1)
     pico_enable_stdio_uart(${target} 0)

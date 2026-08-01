@@ -2,7 +2,7 @@
 
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
-#include "hardware/pwm.h"
+#include "hardware/pio.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
 
@@ -13,54 +13,130 @@ clk_mode_t clk_mode = CLK_STEP; /* main() calls asic_clk_set_hz() at boot */
 uint32_t rx_settle_us;
 uint32_t serial_half_us;
 
+/*
+ * PIO square-wave generator, hand-encoded (6 instructions, so no
+ * pioasm step). One side-set bit drives TT_PIN_PROJ_CLK. Two
+ * programs share the state machine:
+ *
+ * counter (offsets 0..3), period = 2*(y+2) cycles, y is 32 bits:
+ *   0: mov x, y     side 0     ; low phase:  y+2 cycles
+ *   1: jmp x--, 1   side 0
+ *   2: mov x, y     side 1     ; high phase: y+2 cycles
+ *   3: jmp x--, 3   side 1
+ *
+ * fast (offsets 4..5), period = N cycles for N = 2..32, exact,
+ * via instruction delay slots:
+ *   4: nop [hi-1]   side 1
+ *   5: nop [lo-1]   side 0
+ *
+ * Frequency = clk_sys / period. The period rounds UP so the true
+ * frequency never exceeds the request.
+ */
+
+#define CLK_PIO pio0
+#define CLK_SM 0u
+
+#define OFF_COUNTER 0u
+#define OFF_FAST 4u
+#define FAST_MAX_PERIOD 32u
+
+static bool pio_ready;
+
+static inline uint16_t side(uint v) {
+    return (uint16_t)pio_encode_sideset(1, v);
+}
+
+static void clk_pio_init(void) {
+    if (pio_ready)
+        return;
+    pio_sm_claim(CLK_PIO, CLK_SM);
+
+    CLK_PIO->instr_mem[OFF_COUNTER + 0] =
+        pio_encode_mov(pio_x, pio_y) | side(0);
+    CLK_PIO->instr_mem[OFF_COUNTER + 1] =
+        pio_encode_jmp_x_dec(OFF_COUNTER + 1) | side(0);
+    CLK_PIO->instr_mem[OFF_COUNTER + 2] =
+        pio_encode_mov(pio_x, pio_y) | side(1);
+    CLK_PIO->instr_mem[OFF_COUNTER + 3] =
+        pio_encode_jmp_x_dec(OFF_COUNTER + 3) | side(1);
+    /* fast program slots are rewritten per frequency */
+
+    pio_gpio_init(CLK_PIO, TT_PIN_PROJ_CLK);
+    gpio_set_input_enabled(TT_PIN_PROJ_CLK, true); /* feed_instr and
+                                                      asic_clk_stop
+                                                      read it back */
+    pio_sm_set_consecutive_pindirs(CLK_PIO, CLK_SM, TT_PIN_PROJ_CLK, 1,
+                                   true);
+
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_sideset(&c, 1, false, false);
+    sm_config_set_sideset_pins(&c, TT_PIN_PROJ_CLK);
+    sm_config_set_set_pins(&c, TT_PIN_PROJ_CLK, 1); /* for step mode */
+    pio_sm_init(CLK_PIO, CLK_SM, OFF_COUNTER, &c);
+    pio_ready = true;
+}
+
 uint32_t asic_clks_us(uint32_t n) {
     return (n * 1000000u + clk_hz - 1) / clk_hz;
 }
 
 bool asic_clk_set_hz(uint32_t hz, uint32_t *actual) {
-    /* The PWM wrap counter is 16 bits. Frequencies below
-     * clk_sys / 65536 (~2.3 kHz) need the clock divider. The top is
-     * clk_sys / 2 (wrap = 2); the true output frequency gets coarse
-     * near it and is reported back via *actual. */
     uint32_t sys = clock_get_hz(clk_sys);
     if (hz < CLK_HZ_MIN || hz > sys / 2)
         return false;
-    uint32_t div = (uint32_t)(sys / ((uint64_t)hz * 65536u)) + 1u;
-    if (div > 255u)
-        return false; /* not reachable for hz >= CLK_HZ_MIN */
-    /* Round the period UP so the true frequency never exceeds the
-     * request — a design's clock rating must not be overshot. */
-    uint32_t wrap = (sys / div + hz - 1u) / hz;
+    clk_pio_init();
 
-    uint slice = pwm_gpio_to_slice_num(TT_PIN_PROJ_CLK);
-    pwm_set_enabled(slice, false);
-    pwm_set_clkdiv_int_frac(slice, (uint8_t)div, 0);
-    pwm_set_wrap(slice, (uint16_t)(wrap - 1));
-    pwm_set_gpio_level(TT_PIN_PROJ_CLK, (uint16_t)(wrap / 2));
-    pwm_set_counter(slice, 0);
-    gpio_set_function(TT_PIN_PROJ_CLK, GPIO_FUNC_PWM);
-    gpio_set_input_enabled(TT_PIN_PROJ_CLK, true); /* feed_instr and
-                                                      asic_clk_stop read it */
-    pwm_set_enabled(slice, true);
+    /* Period in sys-clock cycles, rounded up (never overshoot). */
+    uint64_t period = ((uint64_t)sys + hz - 1) / hz;
+
+    pio_sm_set_enabled(CLK_PIO, CLK_SM, false);
+    pio_sm_clear_fifos(CLK_PIO, CLK_SM);
+    pio_sm_restart(CLK_PIO, CLK_SM);
+
+    uint entry;
+    if (period <= FAST_MAX_PERIOD) {
+        uint hi = (uint)period / 2, lo = (uint)period - hi;
+        CLK_PIO->instr_mem[OFF_FAST + 0] =
+            pio_encode_nop() | side(1) | pio_encode_delay(hi - 1);
+        CLK_PIO->instr_mem[OFF_FAST + 1] =
+            pio_encode_nop() | side(0) | pio_encode_delay(lo - 1);
+        pio_sm_set_wrap(CLK_PIO, CLK_SM, OFF_FAST, OFF_FAST + 1);
+        entry = OFF_FAST + 1; /* start with the low phase */
+    } else {
+        /* period = 2*(y+2); round the half-period up */
+        uint64_t half = (period + 1) / 2;
+        if (half - 2 > 0xFFFFFFFFull)
+            half = 0xFFFFFFFFull + 2ull; /* not reachable for hz >= 1 */
+        uint32_t y = (uint32_t)(half - 2);
+        period = 2 * half;
+        pio_sm_put(CLK_PIO, CLK_SM, y);
+        pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_pull(false, true) | side(0));
+        pio_sm_exec(CLK_PIO, CLK_SM,
+                    pio_encode_out(pio_y, 32) | side(0));
+        pio_sm_set_wrap(CLK_PIO, CLK_SM, OFF_COUNTER, OFF_COUNTER + 3);
+        entry = OFF_COUNTER; /* starts with the low phase */
+    }
+    pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_jmp(entry) | side(0));
+    pio_sm_set_enabled(CLK_PIO, CLK_SM, true);
 
     clk_hz = hz;
     clk_mode = CLK_RUN;
     rx_settle_us = asic_clks_us(32u);
     serial_half_us = asic_clks_us(6u);
-    if (actual)
-        *actual = sys / (div * wrap);
+    if (actual) /* true output frequency, nearest integer */
+        *actual = (uint32_t)(((uint64_t)sys + period / 2) / period);
     return true;
 }
 
 void asic_clk_stop(void) {
     if (clk_mode == CLK_STEP)
         return;
-    uint slice = pwm_gpio_to_slice_num(TT_PIN_PROJ_CLK);
 
-    /* Freeze the PWM only while the output is low. A freeze in the high
-     * phase, or too near the falling edge, would make a runt pulse when
-     * the pin then goes to GPIO-low. The interrupts-off window is only
-     * the read-back plus one register write. */
+    /* Freeze the state machine only while the output is low. A
+     * freeze in the high phase, or too near the falling edge, would
+     * make a runt pulse when the pin is then parked low. The
+     * interrupts-off window is only the read-back plus one register
+     * write. */
     for (;;) {
         while (!gpio_get(TT_PIN_PROJ_CLK))
             tight_loop_contents();
@@ -68,17 +144,15 @@ void asic_clk_stop(void) {
             tight_loop_contents();
         uint32_t save = save_and_disable_interrupts();
         if (!gpio_get(TT_PIN_PROJ_CLK)) {
-            pwm_set_enabled(slice, false);
+            pio_sm_set_enabled(CLK_PIO, CLK_SM, false);
             restore_interrupts(save);
             break;
         }
         restore_interrupts(save); /* an IRQ delayed us a full phase; retry */
     }
 
-    gpio_put(TT_PIN_PROJ_CLK, 0);
-    gpio_set_dir(TT_PIN_PROJ_CLK, GPIO_OUT);
-    gpio_set_function(TT_PIN_PROJ_CLK, GPIO_FUNC_SIO);
-    gpio_set_input_enabled(TT_PIN_PROJ_CLK, true);
+    /* Park low. The exec runs even while the SM is disabled. */
+    pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_set(pio_pins, 0) | side(0));
     clk_mode = CLK_STEP;
 }
 
@@ -86,9 +160,9 @@ bool asic_clk_step(uint32_t n) {
     if (clk_mode != CLK_STEP)
         return false;
     while (n--) {
-        gpio_put(TT_PIN_PROJ_CLK, 1);
+        pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_set(pio_pins, 1) | side(1));
         busy_wait_us(10);
-        gpio_put(TT_PIN_PROJ_CLK, 0);
+        pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_set(pio_pins, 0) | side(0));
         busy_wait_us(10);
     }
     return true;

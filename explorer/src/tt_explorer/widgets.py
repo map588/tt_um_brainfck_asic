@@ -296,7 +296,7 @@ class ClockPanel(Vertical):
                 yield Button("Set", id="freq-set")
                 for hz, label in self.PRESETS:
                     yield Button(label, id=f"preset-{hz}", classes="preset")
-            yield Label("10 Hz – 75 MHz (PWM) · BF programs need ≤ 200 kHz "
+            yield Label("1 Hz – 75 MHz · BF programs need ≤ 200 kHz "
                         "(serial link limit)", classes="hint")
         with Vertical(id="clk-step"):
             with Horizontal(classes="clk-line"):

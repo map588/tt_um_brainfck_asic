@@ -1,9 +1,10 @@
 /*
- * Runtime ASIC clock control.
+ * Runtime ASIC clock control (PIO square-wave generator).
  *
  * Two modes:
- *   CLK_RUN  — PWM makes a free-running clock on TT_PIN_PROJ_CLK.
- *   CLK_STEP — PWM is off, the pin is a GPIO parked low, and
+ *   CLK_RUN  — a PIO state machine makes a free-running clock on
+ *              TT_PIN_PROJ_CLK, exact to one sys-clock cycle.
+ *   CLK_STEP — the state machine is off, the pin is parked low, and
  *              asic_clk_step() makes single clean pulses.
  */
 #pragma once
@@ -11,7 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CLK_HZ_MIN 10u /* PWM clkdiv floor: clk_sys/(255*65536) ~ 9 Hz */
+#define CLK_HZ_MIN 1u /* the PIO cycle counter is 32 bits */
 /* Upper limit is clk_sys/2 (~75 MHz), checked at run time. The BF
  * engine has its own, much lower limits (see commands.c). */
 #define CLK_STEP_MAX 65535u
