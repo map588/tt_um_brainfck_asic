@@ -5,9 +5,68 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, DataTable, Input, Label, RichLog, Static, Switch
+from textual.widgets import Button, DataTable, Input, Label, RichLog, Static
 
 from .index import Project
+
+
+class CycleButton(Button):
+    """A button whose label always shows the CURRENT state; a click
+    advances to the next state and posts Cycled. Programmatic
+    set_state() is silent, so syncing the UI never echoes commands."""
+
+    class Cycled(Message):
+        def __init__(self, button: "CycleButton", state: str) -> None:
+            self.button = button
+            self.state = state
+            super().__init__()
+
+        @property
+        def control(self) -> "CycleButton":
+            return self.button
+
+    def __init__(self, states: list[tuple[str, str, str]], **kwargs) -> None:
+        """states: (key, label, css_class) per state."""
+        self._states = states
+        self._index = 0
+        super().__init__(states[0][1], **kwargs)
+        self.add_class(states[0][2])
+
+    @property
+    def state(self) -> str:
+        return self._states[self._index][0]
+
+    def set_state(self, key: str) -> None:
+        for i, (k, label, css) in enumerate(self._states):
+            if k == key:
+                self.remove_class(self._states[self._index][2])
+                self._index = i
+                self.label = label
+                self.add_class(css)
+                return
+        raise ValueError(f"unknown state {key!r}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        nxt = self._states[(self._index + 1) % len(self._states)][0]
+        self.set_state(nxt)
+        self.post_message(self.Cycled(self, nxt))
+
+
+def seven_seg(value: int) -> str:
+    """ASCII art of the board's 7-segment display for a uo byte.
+    Segments a..g are uo[0..6], the decimal point is uo[7]."""
+    a, b, c, d, e, f, g, dp = ((value >> i) & 1 for i in range(8))
+    return "\n".join([
+        " _ " if a else "   ",
+        ("|" if f else " ") + ("_" if g else " ") + ("|" if b else " "),
+        ("|" if e else " ") + ("_" if d else " ") + ("|" if c else " ")
+        + ("." if dp else " "),
+    ])
+
+
+def _dot(level: int) -> str:
+    return "●" if level else "○"
 
 
 class ProjectList(Vertical):
@@ -62,7 +121,8 @@ class ProjectList(Vertical):
 
 
 class DetailPane(VerticalScroll):
-    """Description and pinout of the highlighted project."""
+    """Description of the highlighted project. Pin names appear on the
+    Bench rows, so no pinout listing here."""
 
     def compose(self) -> ComposeResult:
         yield Static("select a project…", id="detail-text")
@@ -75,143 +135,198 @@ class DetailPane(VerticalScroll):
             p.description or "(no description)",
         ]
         if p.clock_hz:
-            lines += ["", f"clock: {p.clock_hz:,} Hz"]
-        if p.pinout:
-            lines.append("")
-            for pin, name in p.pinout.items():
-                if name:
-                    lines.append(f"  {pin:8s} {name}")
+            lines += ["", f"intended clock: {p.clock_hz:,} Hz"]
+        lines += ["", "[dim]select (enter) to load it on the Bench[/dim]"]
         self.query_one("#detail-text", Static).update("\n".join(lines))
 
 
-class ClockPanel(Vertical):
-    """ASIC clock: set frequency, stop into step mode, pulse, resume."""
+class UiPanel(Vertical):
+    """The 8 chip inputs. Either the MCU drives them (value buttons)
+    or the bus is released so the DIP switches / PMOD drive."""
+
+    BORDER_TITLE = "ui_in — chip inputs"
 
     def compose(self) -> ComposeResult:
-        yield Label("clock", classes="panel-title")
-        with Horizontal():
-            yield Input(placeholder="Hz", id="freq-input")
-            yield Button("set", id="freq-set")
-        with Horizontal():
-            yield Button("stop", id="clk-stop")
-            yield Input(value="1", id="step-count")
-            yield Button("step", id="clk-step")
-            yield Button("resume", id="clk-resume")
-        yield Static("mode: ?", id="clk-mode")
+        with Horizontal(classes="bus-head"):
+            yield Label("driven by ")
+            yield CycleButton(
+                [("mcu", " MCU ", "cyc-mcu"),
+                 ("ext", " DIP·PMOD ", "cyc-ext")],
+                id="ui-bus")
+        for i in range(8):
+            with Horizontal(classes="pin-row"):
+                yield Label(str(i), classes="pin-bit")
+                yield CycleButton(
+                    [("0", " 0 ", "cyc-low"), ("1", " 1 ", "cyc-high")],
+                    id=f"ui{i}", classes="pin-btn")
+                yield Static("·", id=f"ui-lvl{i}", classes="pin-lvl")
+                yield Label("", id=f"ui-name{i}", classes="pin-name")
 
-    def show_mode(self, mode: str, freq: int) -> None:
-        self.query_one("#clk-mode", Static).update(
-            f"mode: {mode}  freq: {freq:,} Hz")
+    def byte(self) -> int:
+        v = 0
+        for i in range(8):
+            if self.query_one(f"#ui{i}", CycleButton).state == "1":
+                v |= 1 << i
+        return v
+
+    def set_names(self, pinout: dict[str, str]) -> None:
+        for i in range(8):
+            self.query_one(f"#ui-name{i}", Label).update(
+                pinout.get(f"ui[{i}]", "") or "")
+
+    def set_bus(self, mcu_drives: bool) -> None:
+        self.query_one("#ui-bus", CycleButton).set_state(
+            "mcu" if mcu_drives else "ext")
+        for i in range(8):
+            self.query_one(f"#ui{i}", CycleButton).disabled = not mcu_drives
+            if mcu_drives:
+                self.query_one(f"#ui-lvl{i}", Static).update("·")
+
+    def show_levels(self, value: int) -> None:
+        """Pad levels while released (what the DIP switches set)."""
+        for i in range(8):
+            self.query_one(f"#ui-lvl{i}", Static).update(
+                _dot((value >> i) & 1))
+
+    def reset(self) -> None:
+        for i in range(8):
+            self.query_one(f"#ui{i}", CycleButton).set_state("0")
+        self.set_bus(True)
 
 
-class PinPanel(Vertical):
-    """Pin control. Every board connector (DIP switches, 7-segment,
-    PMODs, headers, MCU) shares the same nets, so this panel manages
-    who drives:
+class UoPanel(Vertical):
+    """The 8 chip outputs, plus a mirror of the board's 7-segment
+    display (which is permanently wired to this bus)."""
 
-    - ui_in: the MCU drives the switches' value, or `release` frees
-      the pins so the DIP switches / PMOD can drive them.
-    - uo_out: always driven by the design; the 7-segment shows the
-      same byte.
-    - uio: the DESIGN controls its own side per pin (uio_oe). The
-      `out` toggle here sets only the MCU side — enable it only for
-      pins the selected design's pinout declares as its inputs.
-    """
+    BORDER_TITLE = "uo_out — chip outputs (live)"
 
     def compose(self) -> ComposeResult:
-        yield Label("pins", classes="panel-title")
-        with Horizontal(id="ui-head"):
-            yield Label("ui_in  bit 7 → 0")
-            yield Button("release", id="ui-mode")
-        with Horizontal(id="ui-switches"):
-            for i in range(7, -1, -1):
-                yield Switch(id=f"ui{i}")
-        yield Static("", id="ui-display")
-        yield Static("uo_out: --", id="uo-display")
-        yield Label("uio   pin (design)      out val lvl", id="uio-caption")
         for i in range(8):
-            with Horizontal(classes="uio-row"):
-                yield Label(str(i), classes="uio-bit")
-                yield Label("", id=f"uio-name{i}", classes="uio-name")
-                yield Switch(id=f"uiod{i}")
-                yield Switch(id=f"uiow{i}", disabled=True)
-                yield Static("○", id=f"uio-lvl{i}", classes="uio-lvl")
+            with Horizontal(classes="pin-row"):
+                yield Label(str(i), classes="pin-bit")
+                yield Static("○", id=f"uo-lvl{i}", classes="pin-lvl")
+                yield Label("", id=f"uo-name{i}", classes="pin-name")
+        with Horizontal(id="sevenseg-row"):
+            yield Static(seven_seg(0), id="sevenseg")
+            yield Static("uo = 0x00\non the board's\n7-segment", id="uo-hex")
 
-    # -- reads --
+    def set_names(self, pinout: dict[str, str]) -> None:
+        for i in range(8):
+            self.query_one(f"#uo-name{i}", Label).update(
+                pinout.get(f"uo[{i}]", "") or "")
 
-    def ui_byte(self) -> int:
+    def show(self, value: int) -> None:
+        for i in range(8):
+            self.query_one(f"#uo-lvl{i}", Static).update(
+                _dot((value >> i) & 1))
+        self.query_one("#sevenseg", Static).update(seven_seg(value))
+        self.query_one("#uo-hex", Static).update(
+            f"uo = 0x{value:02x}\non the board's\n7-segment")
+
+
+class UioPanel(Vertical):
+    """The 8 bidirectional pins. The DESIGN controls its own side per
+    pin (uio_oe); these buttons set only the MCU side. Check the pin
+    name before driving one."""
+
+    BORDER_TITLE = "uio — bidirectional (MCU side)"
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="bus-head"):
+            yield Label("design owns its side — drive inputs only")
+        for i in range(8):
+            with Horizontal(classes="pin-row"):
+                yield Label(str(i), classes="pin-bit")
+                yield CycleButton(
+                    [("listen", " listen ", "cyc-listen"),
+                     ("d0", " drive 0 ", "cyc-low"),
+                     ("d1", " drive 1 ", "cyc-high")],
+                    id=f"uio{i}", classes="pin-btn")
+                yield Static("○", id=f"uio-lvl{i}", classes="pin-lvl")
+                yield Label("", id=f"uio-name{i}", classes="pin-name")
+
+    def mask(self) -> int:
         v = 0
         for i in range(8):
-            if self.query_one(f"#ui{i}", Switch).value:
+            if self.query_one(f"#uio{i}", CycleButton).state != "listen":
                 v |= 1 << i
         return v
 
-    def uiod_mask(self) -> int:
+    def value(self) -> int:
         v = 0
         for i in range(8):
-            if self.query_one(f"#uiod{i}", Switch).value:
+            if self.query_one(f"#uio{i}", CycleButton).state == "d1":
                 v |= 1 << i
         return v
 
-    def uiow_byte(self) -> int:
-        v = 0
+    def set_names(self, pinout: dict[str, str]) -> None:
         for i in range(8):
-            if self.query_one(f"#uiow{i}", Switch).value:
-                v |= 1 << i
-        return v
+            self.query_one(f"#uio-name{i}", Label).update(
+                pinout.get(f"uio[{i}]", "") or "")
 
-    # -- updates --
-
-    @staticmethod
-    def _bits(value: int) -> str:
-        return " ".join("●" if (value >> i) & 1 else "○"
-                        for i in range(7, -1, -1))
-
-    def set_pinout(self, pinout: dict[str, str]) -> None:
-        """Show the selected design's own uio pin names."""
-        for i in range(8):
-            name = pinout.get(f"uio[{i}]", "") or ""
-            self.query_one(f"#uio-name{i}", Label).update(name[:18])
-
-    def set_ui_mode(self, driving: bool) -> None:
-        self.query_one("#ui-mode", Button).label = (
-            "release" if driving else "drive")
-        for i in range(8):
-            self.query_one(f"#ui{i}", Switch).disabled = not driving
-        self.query_one("#ui-display", Static).update(
-            "" if driving else "released — DIP/PMOD drive the pins")
-
-    def show_ui_levels(self, value: int) -> None:
-        self.query_one("#ui-display", Static).update(
-            f"pads:   {self._bits(value)}  0x{value:02x}")
-
-    def show_uo(self, value: int) -> None:
-        self.query_one("#uo-display", Static).update(
-            f"uo_out: {self._bits(value)}  0x{value:02x}")
-
-    def show_uio(self, value: int) -> None:
+    def show(self, value: int) -> None:
         for i in range(8):
             self.query_one(f"#uio-lvl{i}", Static).update(
-                "●" if (value >> i) & 1 else "○")
+                _dot((value >> i) & 1))
 
-    def sync_uiow_enable(self) -> None:
+    def reset(self) -> None:
         for i in range(8):
-            drives = self.query_one(f"#uiod{i}", Switch).value
-            self.query_one(f"#uiow{i}", Switch).disabled = not drives
+            self.query_one(f"#uio{i}", CycleButton).set_state("listen")
 
-    def reset_for_design(self) -> None:
-        """Match the firmware's safe profile after a design switch."""
-        with self.prevent(Switch.Changed):
-            for i in range(8):
-                self.query_one(f"#ui{i}", Switch).value = False
-                self.query_one(f"#uiod{i}", Switch).value = False
-                self.query_one(f"#uiow{i}", Switch).value = False
-        self.sync_uiow_enable()
-        self.set_ui_mode(True)
+
+class ClockPanel(Vertical):
+    """The project clock. Exactly one of the two mode containers is
+    visible: RUNNING (free-running PWM) or STOPPED (single-step)."""
+
+    BORDER_TITLE = "clock"
+
+    PRESETS = [(10, "10 Hz"), (1_000, "1 kHz"), (50_000, "50 kHz"),
+               (200_000, "200 kHz"), (2_000_000, "2 MHz")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="clk-run"):
+            with Horizontal(classes="clk-line"):
+                yield Static("▶ RUNNING", id="clk-run-state")
+                yield Static("", id="clk-run-freq")
+                yield Button("■  Stop clock", id="clk-stop")
+            with Horizontal(classes="clk-line"):
+                yield Label("set frequency:")
+                yield Input(placeholder="Hz", id="freq-input")
+                yield Button("Set", id="freq-set")
+                for hz, label in self.PRESETS:
+                    yield Button(label, id=f"preset-{hz}", classes="preset")
+            yield Label("BF programs need ≤ 200 kHz (serial link limit)",
+                        classes="hint")
+        with Vertical(id="clk-step"):
+            with Horizontal(classes="clk-line"):
+                yield Static("⏸ STOPPED — single-step mode",
+                             id="clk-step-state")
+                yield Static("stepped 0", id="step-total")
+            with Horizontal(classes="clk-line"):
+                yield Button("Step 1", id="step-1")
+                yield Button("Step 10", id="step-10")
+                yield Button("Step 100", id="step-100")
+                yield Button("▶  Resume clock", id="clk-resume")
+            yield Label("space = step 1 · s = resume", classes="hint")
+        yield Static("", id="clk-error")
+
+    def show_mode(self, mode: str, freq: int) -> None:
+        running = mode == "run"
+        self.query_one("#clk-run").display = running
+        self.query_one("#clk-step").display = not running
+        self.query_one("#clk-run-freq", Static).update(f"{freq:,} Hz")
+
+    def set_steps(self, n: int) -> None:
+        self.query_one("#step-total", Static).update(f"stepped {n:,}")
+
+    def set_error(self, text: str) -> None:
+        self.query_one("#clk-error", Static).update(text)
 
 
 class ConsolePane(Vertical):
     """Raw protocol traffic plus a free-form command line."""
+
+    BORDER_TITLE = "serial console"
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="console-log", markup=False, wrap=True)

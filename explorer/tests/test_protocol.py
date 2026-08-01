@@ -53,3 +53,11 @@ def test_hex_byte_roundtrip():
     assert protocol.hex_byte(0) == "00"
     assert protocol.hex_byte(255) == "ff"
     assert protocol.parse_hex_byte("a5") == 0xA5
+
+
+def test_seven_seg():
+    from tt_explorer.widgets import seven_seg
+    # 0x6d lights a..g for the digit 5: a,c,d,f,g on; b,e,dp off
+    assert seven_seg(0x6D) == " _ \n|_ \n _| "
+    assert seven_seg(0x00) == "   \n   \n    "
+    assert seven_seg(0xFF) == " _ \n|_|\n|_|."
