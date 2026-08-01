@@ -41,7 +41,7 @@ TOPLEVEL = tb
 
 
 # List test modules to run, separated by commas and without the .py suffix:
-COCOTB_TEST_MODULES = test,test_physical_interface
+COCOTB_TEST_MODULES = test,test_physical_interface,test_silicon_bugs
 
 # include cocotb's make rules to take care of the simulator setup
 include $(shell cocotb-config --makefiles)/Makefile.sim
