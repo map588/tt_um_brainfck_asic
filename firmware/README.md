@@ -33,17 +33,40 @@ ASIC clock 200000 Hz, design #448
 Anything that is not one of the eight BF ops is a comment; anything
 after the `!` is consumed as `,` input by the running program.
 
-## Known issues on ttsky25b silicon (2026-08-01)
+## Silicon bugs and their firmware workarounds
 
-- **ASIC→MCU serial link bit-slips at ≥ 500 kHz** (0x42 arrives as
-  0x21). Fully reliable at ≤ 200 kHz — hence bf_host's fixed clock.
-- **Tight and nested loops fail at every clock speed** (so not a
-  timing problem): `[-]` dies with "no jump target transmitted for
-  ']'", nested loops die with "no response to '['" and a desynced PC
-  mirror. Single-level loops with longer bodies (e.g.
-  `++++++++[>++++++++<-]>+.`) run reliably. Suspect the bracket-stack
-  handshake; `tt_host`'s `stop`/`step` is the tool to walk through a
-  failing `]` one clock at a time.
+Four RTL bugs were found on ttsky25b silicon (2026-08-01) by RTL
+analysis plus step-mode pin traces. All four are worked around in
+`src/bf_run.c`, and `Hello World!` runs on the chip.
+
+1. **SPI cache refill never completes.** `STATE_SPI_WRITE/FETCH` in
+   `bf_asic.v` re-issues its transaction forever: `transfer_done` and
+   `!spi_busy` land on the same cycle, and the issue branch (which has
+   no `!transfer_done` guard) wins. Trace: endless `02 00 00 ...`
+   write transactions, CS parked low. *Workaround:* the host never
+   feeds a pointer move that leaves the cache window; it virtualizes
+   far moves through `.`/`,` and keeps the full 1024-cell tape in RAM.
+2. **Phantom TX frames.** `bf_asic` clears `tx_start` one cycle after
+   `serial_tx` returns to IDLE, so every ASIC→MCU frame repeats once.
+   A tight `]`/`.` sequence collides with the phantom (this killed
+   `[-]`). *Workaround:* the host drains the duplicate after every
+   received frame.
+3. **`]` jump double-pops the bracket stack.** The `WAIT_JUMP` start
+   branch fires on two consecutive cycles before `tx_busy` rises;
+   with two or more stack entries the ASIC pops both and its PC lands
+   on the second (this killed nested loops). *Workaround:* the host
+   models the double pop and feeds a synthetic `[` to push the lost
+   entry back.
+4. **Physical cell 4 has no storage.** The cache mux returns
+   `data_current` for offset 0 and the save path drops the value when
+   the pointer leaves `tape_base`; the cell reads as a copy of
+   whatever the pointer carried in (this corrupted one letter of
+   hello-world). *Workaround:* logical cell L maps to physical L for
+   L < 4 and L + 1 for L ≥ 4; cell 4 is transit-only.
+
+Separate MCU-side limit: the host's bit-banged sampling of the
+ASIC→MCU link bit-slips at ASIC clocks ≥ 500 kHz. 200 kHz and below
+is fully reliable — hence bf_host's fixed clock.
 
 ## tt_host command protocol
 

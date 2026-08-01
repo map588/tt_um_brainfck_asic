@@ -27,6 +27,7 @@
  */
 #include <setjmp.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
@@ -286,46 +287,162 @@ static void __attribute__((noreturn)) die(const char *why, uint16_t pc) {
     longjmp(bf_err, 1);
 }
 
-/* ---- execution ---- */
+/* ---- execution ----
+ *
+ * Two silicon bugs shape this loop (confirmed by step-mode traces,
+ * 2026-08-01; see README "Known issues"):
+ *
+ * 1. serial_tx re-arms on a stale start strobe: every ASIC->MCU frame
+ *    is followed by an identical phantom frame. drain_phantom()
+ *    consumes it so it cannot collide with the next handshake.
+ *
+ * 2. The SPI cache-refill FSM re-issues its transaction forever (the
+ *    transfer_done exit is unreachable). The host therefore never
+ *    feeds a pointer move that would leave the ASIC's cache window
+ *    (physical cells 0..8): it virtualizes such moves through the
+ *    working '.'/',' serial paths and keeps the full 1024-cell tape
+ *    in vtape. Synthetic ops advance the ASIC's PC, so the host
+ *    models it in `apc`, separate from the program index `pc`.
+ *
+ * 3. Physical cell 4 (tape_base) has no backing store in the RTL:
+ *    the cache mux returns data_current for offset 0 and the save
+ *    path drops the value when the pointer leaves. Reads alias the
+ *    value carried in; writes are lost. The host therefore never
+ *    parks on physical cell 4 — logical cell L maps to physical L
+ *    for L < 4 and L + 1 for L >= 4, and the logical 3<->4 move
+ *    feeds two physical moves (transit through cell 4 is safe).
+ */
+
+#define NATIVE_LIMIT 7u /* logical cells 0..7 live in the ASIC */
+
+static inline uint phys_of(uint16_t l) { return l < 4 ? l : l + 1u; }
+
+static uint8_t vtape[1024];
+
+static void drain_phantom(uint16_t pc) {
+    if (recv10(SERIAL_TIMEOUT_US) < 0)
+        die("phantom TX frame missing", pc);
+}
+
+/* Feed a synthetic '.' and return data_current (the current cell). */
+static uint8_t synth_out(uint8_t apc_next, uint16_t pc) {
+    feed_instr(OP_OUT);
+    if (await_pc_or_irq(apc_next, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
+        die("no interrupt_io for synthetic '.'", pc);
+    int v = recv10(SERIAL_TIMEOUT_US);
+    if (v < 0)
+        die("no data for synthetic '.'", pc);
+    drain_phantom(pc);
+    if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
+        die("interrupt_io stuck after synthetic '.'", pc);
+    if (!wait_pc_low(apc_next, PC_TIMEOUT_US))
+        die("synthetic '.' never retired", pc);
+    return (uint8_t)(v & 0xFF);
+}
+
+/* Feed a synthetic ',' loading `byte` into data_current. */
+static void synth_in(uint8_t byte, uint8_t apc_next, uint16_t pc) {
+    feed_instr(OP_IN);
+    if (await_pc_or_irq(apc_next, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
+        die("no interrupt_io for synthetic ','", pc);
+    busy_wait_us(rx_settle_us);
+    send10(byte);
+    if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
+        die("interrupt_io stuck after synthetic ','", pc);
+    if (!wait_pc_low(apc_next, PC_TIMEOUT_US))
+        die("synthetic ',' never retired", pc);
+}
 
 static void run(void) {
-    uint16_t pc = 0;
+    uint16_t pc = 0;     /* program index */
+    uint16_t apc = 0;    /* model of the ASIC's PC (drifts from pc) */
+    uint16_t vptr = 0;   /* logical tape pointer */
+    uint16_t abstack[8]; /* ASIC PC values it pushed for '[' */
+    uint sp = 0;
     uint32_t executed = 0;
 
+    memset(vtape, 0, sizeof vtape);
     set_inspect_sel(INSPECT_PC);
 
     while (pc < n_ops) {
         uint8_t op = ops[pc];
-        uint8_t next = (uint8_t)(pc + 1); /* PC low byte after this op */
-        feed_instr(op);
-        executed++;
+        uint8_t anext = (uint8_t)(apc + 1); /* ASIC PC low byte after op */
 
         switch (op) {
         case OP_SUB:
         case OP_ADD:
-        case OP_LEFT:
-        case OP_RIGHT:
-            /* '<'/'>' may stall for an SPI cache refill; PC advance is the
-             * only completion signal either way. */
-            if (!wait_pc_low(next, PC_TIMEOUT_US))
+            feed_instr(op);
+            executed++;
+            if (!wait_pc_low(anext, PC_TIMEOUT_US))
                 die("timeout waiting for op to retire", pc);
+            apc++;
             pc++;
             break;
 
+        case OP_LEFT:
+        case OP_RIGHT: {
+            uint16_t nv = vptr;
+            if (op == OP_RIGHT) {
+                if (vptr < 1023)
+                    nv = vptr + 1;
+            } else {
+                if (vptr > 0)
+                    nv = vptr - 1;
+            }
+            if (nv == vptr) { /* blocked at a tape edge: pure no-op */
+                pc++;
+                break;
+            }
+            if (vptr <= NATIVE_LIMIT && nv <= NATIVE_LIMIT) {
+                /* Native move inside the cache window. Crossing
+                 * logical 3<->4 takes two physical moves (transit
+                 * through the broken physical cell 4). */
+                uint pa = phys_of(vptr), pb = phys_of(nv);
+                uint moves = pb > pa ? pb - pa : pa - pb;
+                while (moves--) {
+                    feed_instr(op);
+                    executed++;
+                    if (!wait_pc_low((uint8_t)(apc + 1), PC_TIMEOUT_US))
+                        die("timeout waiting for op to retire", pc);
+                    apc++;
+                }
+            } else {
+                /* Virtual move: save the current cell, load the target
+                 * cell. The ASIC's ptr stays parked at the window edge. */
+                vtape[vptr] = synth_out(anext, pc);
+                apc++;
+                synth_in(vtape[nv], (uint8_t)(apc + 1), pc);
+                apc++;
+                executed += 2;
+            }
+            vptr = nv;
+            pc++;
+            break;
+        }
+
         case OP_OPEN: {
-            event_t ev = await_pc_or_irq(next, PIN_IRQ_JUMP, PC_TIMEOUT_US);
+            feed_instr(op);
+            executed++;
+            event_t ev = await_pc_or_irq(anext, PIN_IRQ_JUMP, PC_TIMEOUT_US);
             if (ev == EV_PC_ADVANCED) { /* data!=0: entered loop */
+                if (sp < count_of(abstack))
+                    abstack[sp] = apc;
+                sp++;
+                apc++;
                 pc++;
             } else if (ev == EV_IRQ) { /* data==0: ASIC wants skip target */
-                uint16_t tgt = match[pc];
+                /* The ASIC pushed apc. Send apc back so its PC does not
+                 * move, then run the matching ']' (data==0: pops). */
                 busy_wait_us(rx_settle_us);
-                send10(tgt);
+                send10(apc & 0x3FF);
                 if (!wait_gpio_low(PIN_IRQ_JUMP, SERIAL_TIMEOUT_US))
                     die("interrupt_jump stuck after skip", pc);
-                if (!wait_pc_low((uint8_t)tgt, PC_TIMEOUT_US))
+                if (!wait_pc_low((uint8_t)apc, PC_TIMEOUT_US))
                     die("PC never reached skip target", pc);
-                pc = tgt; /* ASIC now executes the matching ']' (data==0:
-                             pops the bracket it pushed while waiting) */
+                if (sp < count_of(abstack))
+                    abstack[sp] = apc;
+                sp++;
+                pc = match[pc];
             } else {
                 die("no response to '['", pc);
             }
@@ -333,20 +450,51 @@ static void run(void) {
         }
 
         case OP_CLOSE: {
-            event_t ev = await_pc_or_irq(next, PIN_IRQ_JUMP, PC_TIMEOUT_US);
+            feed_instr(op);
+            executed++;
+            event_t ev = await_pc_or_irq(anext, PIN_IRQ_JUMP, PC_TIMEOUT_US);
             if (ev == EV_PC_ADVANCED) { /* data==0: exited loop */
+                if (sp)
+                    sp--;
+                apc++;
                 pc++;
             } else if (ev == EV_IRQ) { /* data!=0: ASIC transmits target */
                 int tgt = recv10(SERIAL_TIMEOUT_US);
                 if (tgt < 0)
                     die("no jump target transmitted for ']'", pc);
+                drain_phantom(pc);
                 if (!wait_gpio_low(PIN_IRQ_JUMP, SERIAL_TIMEOUT_US))
                     die("interrupt_jump stuck after ']'", pc);
-                if ((uint16_t)tgt != match[pc])
+                if (sp && (uint16_t)tgt != (abstack[sp - 1] & 0x3FF))
                     printf("# !! ']' at %u jumped to %d, expected %u "
                            "(bracket stack desync?)\n",
-                           pc, tgt, match[pc]);
-                pc = (uint16_t)tgt; /* the matching '[' re-executes */
+                           pc, tgt, abstack[sp - 1] & 0x3FF);
+                uint16_t back;
+                if (sp >= 2) {
+                    /* Silicon: the WAIT_JUMP start branch fires twice
+                     * before tx_busy rises, so the ASIC pops TWO
+                     * entries and its PC ends at the second one. */
+                    sp -= 2;
+                    back = abstack[sp];
+                    if (!wait_pc_low((uint8_t)back, PC_TIMEOUT_US))
+                        die("PC never reached jump target", pc);
+                    apc = back;
+                    /* Restore the lost entry with a synthetic '[' —
+                     * data is not zero here, so it pushes and advances. */
+                    feed_instr(OP_OPEN);
+                    executed++;
+                    if (await_pc_or_irq((uint8_t)(apc + 1), PIN_IRQ_JUMP,
+                                        PC_TIMEOUT_US) != EV_PC_ADVANCED)
+                        die("synthetic '[' did not push", pc);
+                    abstack[sp++] = apc;
+                    apc++;
+                } else {
+                    back = sp ? abstack[--sp] : 0;
+                    if (!wait_pc_low((uint8_t)back, PC_TIMEOUT_US))
+                        die("PC never reached jump target", pc);
+                    apc = back;
+                }
+                pc = match[pc]; /* the matching '[' re-executes */
             } else {
                 die("no response to ']'", pc);
             }
@@ -354,31 +502,38 @@ static void run(void) {
         }
 
         case OP_IN: {
-            if (await_pc_or_irq(next, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
+            feed_instr(op);
+            executed++;
+            if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for ','", pc);
             int c = getchar(); /* blocks on USB CDC */
             busy_wait_us(rx_settle_us);
             send10((uint16_t)(c & 0xFF));
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
                 die("interrupt_io stuck after ','", pc);
-            if (!wait_pc_low(next, PC_TIMEOUT_US))
+            if (!wait_pc_low(anext, PC_TIMEOUT_US))
                 die("',' never retired", pc);
+            apc++;
             pc++;
             break;
         }
 
         case OP_OUT: {
-            if (await_pc_or_irq(next, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
+            feed_instr(op);
+            executed++;
+            if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for '.'", pc);
             int v = recv10(SERIAL_TIMEOUT_US);
             if (v < 0)
                 die("no data transmitted for '.'", pc);
+            drain_phantom(pc);
             putchar(v & 0xFF);
             stdio_flush();
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
                 die("interrupt_io stuck after '.'", pc);
-            if (!wait_pc_low(next, PC_TIMEOUT_US))
+            if (!wait_pc_low(anext, PC_TIMEOUT_US))
                 die("'.' never retired", pc);
+            apc++;
             pc++;
             break;
         }
