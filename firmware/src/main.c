@@ -13,6 +13,7 @@
 #include "pico/stdio_usb.h"
 #include "pico/stdlib.h"
 
+#include "board.h"
 #include "clock.h"
 #include "commands.h"
 #include "spi_ram.h"

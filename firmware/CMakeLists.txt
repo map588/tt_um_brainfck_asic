@@ -7,28 +7,32 @@ set(PICO_PLATFORM rp2350-arm-s CACHE STRING "Platform")
 
 include(pico_sdk_import.cmake)
 
-project(bf_host C CXX ASM)
+project(tt_host_firmware C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 
 pico_sdk_init()
 
-add_executable(bf_host
-    src/main.c
+set(SHARED_SRCS
     src/bf_run.c
+    src/board.c
     src/clock.c
-    src/commands.c
     src/spi_ram.c
 )
 
-target_include_directories(bf_host PRIVATE include)
+# bf_host: standalone BF paste-and-run firmware.
+add_executable(bf_host src/bf_main.c ${SHARED_SRCS})
 
-target_link_libraries(bf_host
-    pico_stdlib
-    pico_multicore
-    hardware_pwm
-)
+# tt_host: command-protocol firmware for the explorer TUI.
+add_executable(tt_host src/main.c src/commands.c ${SHARED_SRCS})
 
-pico_enable_stdio_usb(bf_host 1)
-pico_enable_stdio_uart(bf_host 0)
-
-pico_add_extra_outputs(bf_host)
+foreach(target bf_host tt_host)
+    target_include_directories(${target} PRIVATE include)
+    target_link_libraries(${target}
+        pico_stdlib
+        pico_multicore
+        hardware_pwm
+    )
+    pico_enable_stdio_usb(${target} 1)
+    pico_enable_stdio_uart(${target} 0)
+    pico_add_extra_outputs(${target})
+endforeach()

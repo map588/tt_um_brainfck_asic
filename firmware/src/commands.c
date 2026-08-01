@@ -18,17 +18,15 @@
 #include "pico/stdlib.h"
 
 #include "bf_run.h"
+#include "board.h"
 #include "clock.h"
 #include "commands.h"
-#include "spi_ram.h"
 #include "tt_pins.h"
 
 #define PROTO_VERSION 1u
-#define BF_DESIGN_ADDR 448u /* tt_um_brainfck_asic mux address on       \
-                               ttsky25b; ignored by the FPGA ASIC-sim */
-#define BF_MIN_HZ 50000u    /* below this, feed_instr's interrupts-off  \
-                               window starves USB and the 200 ms        \
-                               handshake timeouts trip */
+#define BF_MIN_HZ 50000u /* below this, feed_instr's interrupts-off  \
+                            window starves USB and the 200 ms        \
+                            handshake timeouts trip */
 
 static int current_design = -1; /* -1 = none selected since boot */
 static bool bf_armed;
@@ -38,76 +36,14 @@ static uint8_t uio_out_value;
 
 static char reply[96]; /* handlers put their "ok" payload here */
 
-static void pins_safe(void);
-
-/* ---- pin profiles ---- */
-
-void board_pins_init(void) {
-    static const uint pins[] = {TT_PIN_CTRL_ENA, TT_PIN_CTRL_NRST,
-                                TT_PIN_CTRL_INC, TT_PIN_PROJ_NRST,
-                                TT_PIN_LED};
-    for (uint i = 0; i < count_of(pins); i++) {
-        gpio_init(pins[i]);
-        gpio_put(pins[i], 0);
-        gpio_set_dir(pins[i], GPIO_OUT);
-    }
+/* pins_safe() in board.c does not know this file's mirror state;
+ * reset it together whenever the safe profile is applied. */
+static void apply_safe_profile(void) {
     pins_safe();
-}
-
-/* Release everything a foreign design could drive: uio pads become
- * inputs, ui pads (always ASIC inputs) are driven 0. The CS pull-up
- * stays on: it is weak, it cannot fight a driven pad, and it parks
- * core 1 when the BF design is not routed (see spi_ram.c). */
-static void pins_safe(void) {
-    spi_ram_set_enabled(false);
     bf_armed = false;
-    for (uint i = 0; i < 8; i++) {
-        uint p = TT_GPIO_UIO_BASE + i;
-        gpio_init(p); /* SIO function, input */
-        gpio_disable_pulls(p);
-    }
-    gpio_pull_up(PIN_SPI_CS);
-    for (uint i = 0; i < 8; i++) {
-        uint p = TT_GPIO_UI_BASE + i;
-        gpio_init(p);
-        gpio_put(p, 0);
-        gpio_set_dir(p, GPIO_OUT);
-    }
-    for (uint i = 0; i < 8; i++)
-        gpio_init(TT_GPIO_UO_BASE + i);
     ui_value = 0;
     uio_dir_mask = 0;
     uio_out_value = 0;
-}
-
-/* BF roles on top of the safe profile: the 8 ui pins are already MCU
- * outputs (instr, instr_valid, rx clk/bit, inspect_sel) and only MISO
- * changes on the uio side. */
-static void pins_bf(void) {
-    pins_safe();
-    gpio_put(PIN_SPI_MISO, 0);
-    gpio_set_dir(PIN_SPI_MISO, GPIO_OUT);
-    spi_ram_set_enabled(true);
-    bf_armed = true;
-}
-
-/* Mux sequence per tt-micropython-firmware project_mux.py. Harmless on
- * the FPGA ASIC-sim carrier, required on real silicon. */
-static void tt_select_design(uint n) {
-    gpio_put(TT_PIN_CTRL_INC, 0);
-    gpio_put(TT_PIN_CTRL_NRST, 0);
-    gpio_put(TT_PIN_CTRL_ENA, 0);
-    sleep_ms(10);
-    gpio_put(TT_PIN_CTRL_NRST, 1);
-    sleep_ms(10);
-    for (uint i = 0; i < n; i++) {
-        gpio_put(TT_PIN_CTRL_INC, 1);
-        sleep_ms(1);
-        gpio_put(TT_PIN_CTRL_INC, 0);
-        sleep_ms(1);
-    }
-    gpio_put(TT_PIN_CTRL_ENA, 1);
-    sleep_ms(1);
 }
 
 /* ---- argument parsing ---- */
@@ -200,7 +136,7 @@ static const char *cmd_design(int argc, char **argv) {
         return "bad-arg";
     if (n > 1023)
         return "range";
-    pins_safe();
+    apply_safe_profile();
     tt_select_design(n);
     gpio_put(TT_PIN_PROJ_NRST, 0);
     sleep_ms(2);
@@ -296,6 +232,7 @@ static const char *cmd_bf(int argc, char **argv) {
     if (clk_hz < BF_MIN_HZ)
         return "too-slow";
     pins_bf();
+    bf_armed = true;
     printf("ok bf\n");
     const char *err = bf_run_session();
     /* Drain input the program did not consume (e.g. ',' bytes left
