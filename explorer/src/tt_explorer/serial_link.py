@@ -119,9 +119,16 @@ class SerialLink:
     def _route_line(self, line: str) -> None:
         p = self._pending
         if p is not None and not p.future.done():
-            # The firmware echoes what we sent; drop that one line.
-            if not p.echo_dropped and line == p.sent:
-                p.echo_dropped = True
+            # The firmware echoes what we sent, and it processes
+            # commands in order. So the echo marks where our reply
+            # begins: any reply line before it belongs to an earlier
+            # command that timed out, and accepting it would shift
+            # every later reply to the wrong request.
+            if not p.echo_dropped:
+                if line == p.sent:
+                    p.echo_dropped = True
+                elif line:
+                    self._on_line(line)
                 return
             if is_info_line(line):
                 p.info.append(line)
