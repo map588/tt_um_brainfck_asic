@@ -112,6 +112,7 @@ class TTExplorerApp(App):
 
     /* bf tab */
     BfPanel { padding: 0 1; }
+    BfPanel Button { border: none; height: 1; margin-right: 2; }
     #bf-program { height: 10; }
     #bf-controls { height: 1; margin: 1 0; }
     #bf-run { border: none; height: 1; background: $success-darken-2; }
