@@ -24,7 +24,9 @@ names, a mirror of the board's 7-segment display, and the serial
 console. "BF" is the program tab for the Brainf*ck ASIC: type or
 paste a program, press Run, feed ',' input through the field beside
 it, or press Debug to step the program one instruction at a time
-with live pc / cell / bracket-stack state between steps. While a
+with live pc / cell / bracket-stack state between steps. "Break @
+cursor" toggles a breakpoint on the op under the editor cursor;
+Continue then runs to the next breakpoint. While a
 program or debug session runs the firmware is in a raw byte stream, so
 the Bench freezes; between runs the Bench is fully live — including
 the inspect_sel pins (ui6/7), which stay unlocked for state

@@ -122,6 +122,10 @@ class TTExplorerApp(App):
     #bf-stdin:focus { background: $primary-darken-2; }
     #bf-state { margin-left: 2; color: $text-muted; }
     #bf-dbg-controls { height: 1; margin-bottom: 1; }
+    #bf-bp-row { height: 1; margin-bottom: 1; }
+    #bf-break { background: $error-darken-2; }
+    #bf-bp-clear { background: $panel-lighten-1; }
+    #bf-bp-list { margin-left: 2; color: $text-muted; }
     #bf-step { background: $primary-darken-1; }
     #bf-cont { background: $success-darken-2; }
     #bf-abort { background: $warning-darken-2; }
@@ -154,6 +158,7 @@ class TTExplorerApp(App):
         self._bf_tail = ""
         self._bf_linebuf = ""
         self._bf_end: tuple[bool, str] | None = None
+        self._bf_breaks: set[int] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -329,6 +334,9 @@ class TTExplorerApp(App):
         self.link.set_raw_sink(self._on_bf_chunk)
         self.link.write_raw("bfdbg\n" if debug else "bf\n")
         self.link.write_raw(program)
+        if debug:
+            for n in sorted(self._bf_breaks):
+                self.link.write_raw(f"b{n}\n")
 
     def _on_bf_chunk(self, text: str) -> None:
         panel = self.query_one(BfPanel)
@@ -475,6 +483,24 @@ class TTExplorerApp(App):
             if self.link:
                 self.link.write_raw(
                     {"bf-step": "n", "bf-cont": "c", "bf-abort": "q"}[bid])
+        elif bid == "bf-break":
+            panel = self.query_one(BfPanel)
+            n = panel.op_index_at_cursor()
+            if n is None:
+                return
+            if n in self._bf_breaks:
+                self._bf_breaks.discard(n)
+            else:
+                self._bf_breaks.add(n)
+            panel.show_breaks(self._bf_breaks)
+            if self._bf_active and self._bf_debug and self.link:
+                self.link.write_raw(f"b{n}\n")
+        elif bid == "bf-bp-clear":
+            if self._bf_active and self._bf_debug and self.link:
+                for n in self._bf_breaks:
+                    self.link.write_raw(f"b{n}\n")
+            self._bf_breaks.clear()
+            self.query_one(BfPanel).show_breaks(self._bf_breaks)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "freq-input":

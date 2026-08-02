@@ -395,6 +395,10 @@ class BfPanel(Vertical):
             yield Button("▶ Continue", id="bf-cont")
             yield Button("✖ Stop", id="bf-abort")
             yield Static("", id="bf-dbg-state")
+        with Horizontal(id="bf-bp-row"):
+            yield Button("⏺ Break @ cursor", id="bf-break")
+            yield Button("✕ Clear breaks", id="bf-bp-clear")
+            yield Static("breaks: none", id="bf-bp-list")
         yield RichLog(id="bf-output", markup=False, wrap=True)
 
     def on_mount(self) -> None:
@@ -402,6 +406,22 @@ class BfPanel(Vertical):
 
     def program(self) -> str:
         return self.query_one("#bf-program", TextArea).text
+
+    def op_index_at_cursor(self) -> int | None:
+        """Program index of the op at the cursor: the count of BF ops
+        before it in the text (comments do not count)."""
+        area = self.query_one("#bf-program", TextArea)
+        row, col = area.cursor_location
+        lines = area.text.split("\n")
+        offset = sum(len(l) + 1 for l in lines[:row]) + col
+        count = sum(1 for c in area.text[:offset] if c in "+-<>[],.")
+        total = sum(1 for c in area.text if c in "+-<>[],.")
+        return count if count < total else None
+
+    def show_breaks(self, breaks: set[int]) -> None:
+        self.query_one("#bf-bp-list", Static).update(
+            "breaks: " + (", ".join(str(b) for b in sorted(breaks))
+                          if breaks else "none"))
 
     def set_running(self, running: bool, debug: bool = False) -> None:
         self.query_one("#bf-run", Button).disabled = running

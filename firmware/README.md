@@ -87,7 +87,7 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 | `uo` / `uio` | read uo_out / uio pad levels (hex byte) |
 | `uiod [hh]` / `uiow <hh>` | uio direction mask (1 = MCU drives) / output latch |
 | `bf` | interactive BF session (BF design + running clock required) |
-| `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the end, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
+| `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the next breakpoint or the end, `b<index>` = toggle a breakpoint on a program index, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
 
 A `bf` session needs `design 448` and a running clock first, then
 works like bf_host: paste BF source, end with `!`.

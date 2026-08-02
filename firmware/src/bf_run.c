@@ -596,8 +596,39 @@ static void print_dbg_state(const bf_state_t *s) {
     stdio_flush();
 }
 
+/* Breakpoints on program indexes. Cleared at each session start;
+ * the host re-sends its set. */
+static uint8_t bp[MAX_OPS / 8];
+
+static inline bool bp_get(uint16_t i) {
+    return (bp[i >> 3] >> (i & 7)) & 1;
+}
+
+/* 'b' followed by a decimal index toggles a breakpoint. The digits
+ * end at the first non-digit byte (the host sends a newline). */
+static void bp_command(void) {
+    uint32_t v = 0;
+    bool any = false;
+    for (;;) {
+        int c = getchar_timeout_us(200000);
+        if (c < '0' || c > '9')
+            break;
+        v = v * 10 + (uint32_t)(c - '0');
+        any = true;
+    }
+    if (!any || v >= n_ops) {
+        printf("# dbg bp out of range\n");
+        return;
+    }
+    bp[v >> 3] ^= (uint8_t)(1u << (v & 7));
+    printf("# dbg bp %s %lu\n", bp_get((uint16_t)v) ? "set" : "clear",
+           (unsigned long)v);
+    stdio_flush();
+}
+
 /* Like bf_run_session(), but the host paces execution: 'n' runs one
- * instruction, 'c' runs to the end, 'q' stops the session. */
+ * instruction, 'c' runs to the next breakpoint or the end, 'q' stops
+ * the session. */
 const char *bf_debug_session(void) {
     if (!read_program())
         return "bad-program";
@@ -608,11 +639,12 @@ const char *bf_debug_session(void) {
     gpio_put(TT_PIN_LED, 1);
     bf_state_t st;
     state_init(&st);
+    memset(bp, 0, sizeof bp);
     if (setjmp(bf_err)) {
         gpio_put(TT_PIN_LED, 0);
         return "run-fail";
     }
-    printf("# dbg ready: n=step c=continue q=quit\n");
+    printf("# dbg ready: n=step c=continue q=quit b<n>=breakpoint\n");
     print_dbg_state(&st);
     while (st.pc < n_ops) {
         int ch = getchar();
@@ -620,9 +652,17 @@ const char *bf_debug_session(void) {
             exec_one(&st);
             print_dbg_state(&st);
         } else if (ch == 'c') {
-            run(&st); /* prints the halted line */
-            gpio_put(TT_PIN_LED, 0);
-            return NULL;
+            /* at least one instruction, so a continue from a
+             * breakpoint does not stop on the same spot */
+            do {
+                exec_one(&st);
+            } while (st.pc < n_ops && !bp_get(st.pc));
+            if (st.pc < n_ops) {
+                printf("# dbg break at %u\n", st.pc);
+                print_dbg_state(&st);
+            }
+        } else if (ch == 'b') {
+            bp_command();
         } else if (ch == 'q') {
             gpio_put(TT_PIN_LED, 0);
             printf("# dbg stopped by host\n");
