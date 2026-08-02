@@ -74,8 +74,12 @@ class TTExplorerApp(App):
     #clk-stop { background: $warning-darken-2; }
     #clk-resume { background: $success-darken-2; }
     .preset { background: $panel-lighten-1; }
-    #freq-input { width: 16; }
-    #freq-preview { width: 22; margin-right: 1; color: $success; }
+    #freq-input {
+        width: 16; height: 1; border: none;
+        padding: 0 1; background: $boost;
+    }
+    #freq-input:focus { background: $primary-darken-2; }
+    #freq-preview { width: 22; margin: 0 1; color: $success; }
     #freq-preview.preview-bad { color: $warning; }
     .hint { color: $text-muted; }
 
