@@ -74,7 +74,9 @@ class TTExplorerApp(App):
     #clk-stop { background: $warning-darken-2; }
     #clk-resume { background: $success-darken-2; }
     .preset { background: $panel-lighten-1; }
-    #freq-input { width: 12; }
+    #freq-input { width: 16; }
+    #freq-preview { width: 22; margin-right: 1; color: $success; }
+    #freq-preview.preview-bad { color: $warning; }
     .hint { color: $text-muted; }
 
     #buses { height: auto; }
@@ -185,6 +187,9 @@ class TTExplorerApp(App):
         except asyncio.TimeoutError:
             self._log(f"! timeout waiting for reply to {cmd!r}")
             return None
+        except OSError as exc:
+            self._log(f"! serial error: {exc} — is the board still plugged in?")
+            return None
         prefix = "ok" if reply.ok else "err"
         self._log(f"{prefix} {reply.payload}".rstrip())
         return reply
@@ -235,7 +240,7 @@ class TTExplorerApp(App):
                 if reply.ok:
                     self.query_one(UiPanel).show_levels(
                         protocol.parse_hex_byte(reply.payload))
-        except (asyncio.TimeoutError, ValueError):
+        except (asyncio.TimeoutError, ValueError, OSError):
             pass
 
     # -- actions --
@@ -346,6 +351,12 @@ class TTExplorerApp(App):
             await self._refresh_status()
         elif bid.startswith("step-"):
             await self._do_step(int(bid.removeprefix("step-")))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "freq-input":
+            text = event.value
+            self.query_one(ClockPanel).show_freq_preview(
+                parse_hz(text), empty=not text.strip())
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()

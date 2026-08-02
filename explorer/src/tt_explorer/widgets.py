@@ -293,6 +293,7 @@ class ClockPanel(Vertical):
             with Horizontal(classes="clk-line"):
                 yield Label("set frequency:")
                 yield Input(placeholder="e.g. 440, 32k, 1.5M", id="freq-input")
+                yield Static("", id="freq-preview")
                 yield Button("Set", id="freq-set")
                 for hz, label in self.PRESETS:
                     yield Button(label, id=f"preset-{hz}", classes="preset")
@@ -310,6 +311,18 @@ class ClockPanel(Vertical):
                 yield Button("▶  Resume clock", id="clk-resume")
             yield Label("space = step 1 · s = resume", classes="hint")
         yield Static("", id="clk-error")
+
+    def show_freq_preview(self, hz: int | None, empty: bool) -> None:
+        """Live feedback while typing: what the input will set."""
+        preview = self.query_one("#freq-preview", Static)
+        if empty:
+            preview.update("")
+        elif hz is None:
+            preview.update("= ? (try 440, 32k, 1.5M)")
+            preview.set_class(True, "preview-bad")
+        else:
+            preview.update(f"= {hz:,} Hz")
+            preview.set_class(False, "preview-bad")
 
     def show_mode(self, mode: str, freq: int) -> None:
         running = mode == "run"
