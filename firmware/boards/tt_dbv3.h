@@ -16,10 +16,11 @@
 #define PICO_FLASH_SPI_CLKDIV 2
 #endif
 
-/* Assumed 16 MB QSPI flash; this firmware never addresses flash beyond
- * its own (tiny) image, so an oversize value is harmless. */
+/* The board carries a Winbond W25Q32JV: 4 MB external QSPI flash
+ * (the RP2350 has no flash on the die). Keep this exact. Code that
+ * stores data at the end of flash computes the address from it. */
 #ifndef PICO_FLASH_SIZE_BYTES
-#define PICO_FLASH_SIZE_BYTES (16 * 1024 * 1024)
+#define PICO_FLASH_SIZE_BYTES (4 * 1024 * 1024)
 #endif
 
 #endif
