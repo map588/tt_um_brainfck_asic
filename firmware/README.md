@@ -4,17 +4,29 @@ Runs on the Tiny Tapeout demo board v3 (RP2350B) and drives
 `tt_um_brainfck_asic` — either real silicon or the ICE40UP5K ASIC-sim
 carrier built by the `fpga` workflow.
 
-## Two firmware targets
+## Built on the terminal-explorer kit
 
-The build makes two UF2s; flash the one you need:
+This firmware is an extension of the
+[terminal-explorer kit](https://github.com/map588/tt_terminal_explorer),
+pulled in as the `kit/` submodule. The kit core provides the command
+protocol, the PIO clock, the pin control, and the carrier probe. The
+whole BF integration is one file, `src/bf_ext.c`, which overrides
+the kit's extension hooks (`kit/firmware/include/ext.h`): the
+`bf`/`bfdbg` commands, the core-1 SPI RAM launch, the `bf=448` hello
+field, serial timings that follow the clock, and the pin parking
+that keeps core 1 off foreign designs.
 
-- **`bf_host`** (`src/bf_main.c`) — standalone BF host. Boots straight
-  into the paste-a-program loop: open the serial port, paste BF source,
-  end with `!`. Design 448 is selected and the clock is fixed at
-  200 kHz. No commands to learn — this is the debugging workhorse.
-- **`tt_host`** (`src/main.c` + `src/commands.c`) — command-protocol
-  firmware for the `../explorer` TUI: select any shuttle design, set or
-  single-step the clock, peek/poke pins, and run BF as a command.
+The build makes two UF2s. Flash the one you need:
+
+- **`bf_host`** (`src/bf_main.c`): standalone BF host with its own
+  main. It boots straight into the paste-a-program loop: open the
+  serial port, paste BF source, end with `!`. It selects design`include/bf_pins.h` | 448
+  and fixes the clock at 200 kHz. There are no commands to learn.
+  This is the debugging workhorse.
+- **`tt_host`**: the kit's command firmware plus the BF extension.
+  Select any shuttle design, set or single-step the clock, peek and
+  poke pins, and run BF as a command. The `../explorer` TUI drives
+  it.
 
 Both share the BF engine (`src/bf_run.c`: feeds the program one
 instruction at a time, mirrors the ASIC's PC, answers `interrupt_jump`
@@ -77,7 +89,7 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 
 | Command | Effect |
 |---|---|
-| `hello` | `ok tt-explorer 1 bf=448` — protocol version, BF mux address |
+| `hello` | `ok tt-explorer 2 shuttle=ttsky25b bf=448`: the kit protocol plus the BF extension field |
 | `status` | design, clock mode/freq, pin state (`uidrv=0` when ui is released) |
 | `freq <hz>` | free-running clock, 1 Hz – clk_sys/2 (75 MHz), made by PIO with one-sys-cycle resolution. The true output frequency never exceeds the request; the reply reports it. |
 | `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
@@ -89,16 +101,17 @@ this protocol; a bare terminal (`tio`, `screen`) works too.
 | `bf` | interactive BF session (BF design + running clock required) |
 | `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the next breakpoint or the end, `b<index>` = toggle a breakpoint on a program index, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
 
-A `bf` session needs `design 448` and a running clock first, then
+A `bf` session needs `design`include/bf_pins.h` | 448` and a running clock first, then
 works like bf_host: paste BF source, end with `!`.
 
 ## Build
 
-Requires the pico-sdk (≥ 2.0) and the Arm toolchain from the official
-installer (the Homebrew `arm-none-eabi-gcc` lacks newlib's `nosys.specs`).
+You need the pico-sdk (2.0 or newer, `PICO_SDK_PATH`), the Arm GNU
+toolchain, cmake, and ninja. The Homebrew `arm-none-eabi-gcc` does
+not work: it lacks newlib and fails on `nosys.specs`.
 
 ```sh
-cp "$PICO_SDK_PATH/external/pico_sdk_import.cmake" .   # once
+git submodule update --init firmware/kit   # once
 cmake -S . -B build -G Ninja -DPICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/14_2_Rel1
 cmake --build build
 ```
@@ -111,12 +124,12 @@ Configuration knobs:
 | Define | Where | Default | Notes |
 |---|---|---|---|
 | `BF_CLK_HZ` | `src/bf_main.c` | 200 kHz | bf_host clock; the silicon serial-link ceiling. |
-| `BF_DESIGN_ADDR` | `include/board.h` | 448 | tt_um_brainfck_asic mux slot on ttsky25b; the FPGA sim ignores the mux. |
-| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/commands.c` | 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
+| `BF_DESIGN_ADDR` | `include/bf_pins.h` | 448| 448 | tt_um_brainfck_asic mux slot on ttsky25b; the FPGA sim ignores the mux. |
+| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz| 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
 | `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap — the ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO
-map, see `include/tt_pins.h`).
+map, see the kit tt_pins.h and `include/bf_pins.h`).
 
 ## Protocol notes (things the RTL made the firmware do)
 

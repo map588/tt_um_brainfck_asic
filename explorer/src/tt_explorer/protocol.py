@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 
 @dataclass
@@ -37,11 +37,17 @@ def parse_reply(line: str, info: list[str] | None = None) -> Reply:
 
 
 def parse_hello(payload: str) -> dict:
-    """'tt-explorer 1 bf=448' -> {'version': 1, 'bf': 448}"""
+    """'tt-explorer 2 shuttle=ttsky25b bf=448' -> {'version': 2,
+    'shuttle': 'ttsky25b', 'bf': '448'}. Key=value fields pass
+    through as strings."""
     parts = payload.split()
-    if len(parts) != 3 or parts[0] != "tt-explorer":
+    if len(parts) < 2 or parts[0] != "tt-explorer":
         raise ValueError(f"bad hello: {payload!r}")
-    return {"version": int(parts[1]), "bf": int(parts[2].split("=")[1])}
+    out: dict = {"version": int(parts[1])}
+    for part in parts[2:]:
+        key, _, value = part.partition("=")
+        out[key] = value
+    return out
 
 
 def parse_status(payload: str) -> dict:

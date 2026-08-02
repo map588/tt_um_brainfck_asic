@@ -26,8 +26,8 @@ def test_reply_line_detection():
 
 
 def test_parse_hello():
-    h = protocol.parse_hello("tt-explorer 1 bf=448")
-    assert h == {"version": 1, "bf": 448}
+    h = protocol.parse_hello("tt-explorer 2 shuttle=ttsky25b bf=448")
+    assert h == {"version": 2, "shuttle": "ttsky25b", "bf": "448"}
 
 
 def test_parse_status():

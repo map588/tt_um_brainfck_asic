@@ -15,6 +15,7 @@
 #include "pico/stdio_usb.h"
 #include "pico/stdlib.h"
 
+#include "bf_pins.h"
 #include "bf_run.h"
 #include "board.h"
 #include "clock.h"

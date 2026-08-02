@@ -223,8 +223,14 @@ class TTExplorerApp(App):
         reply = await self.send("hello")
         if reply and reply.ok:
             hello = protocol.parse_hello(reply.payload)
-            self._bf_addr = hello["bf"]
-            self.sub_title = f"{self.link.port} · fw v{hello['version']}"
+            if "bf" in hello:
+                self._bf_addr = int(hello["bf"])
+            else:
+                self._log("! this firmware has no BF extension "
+                          "(no bf= in hello)")
+            shuttle = hello.get("shuttle", "")
+            self.sub_title = (f"{self.link.port} · fw v{hello['version']}"
+                              + (f" · {shuttle}" if shuttle else ""))
         await self._refresh_status()
 
     # -- command plumbing --

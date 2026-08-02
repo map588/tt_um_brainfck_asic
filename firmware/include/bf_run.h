@@ -1,5 +1,9 @@
 #pragma once
 
+/* BF pin roles on top of the safe profile; enables the core-1 SPI
+ * RAM emulator. */
+void pins_bf(void);
+
 /* Run one interactive BF session over USB CDC: read a program, run it
  * on the ASIC, bridge ','/'.'. Returns NULL on success or a protocol
  * error token ("bad-program", "run-fail"). The caller must first arm

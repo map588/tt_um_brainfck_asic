@@ -1,0 +1,3 @@
+[submodule "firmware/kit"]
+	path = firmware/kit
+	url = https://github.com/map588/tt_terminal_explorer.git

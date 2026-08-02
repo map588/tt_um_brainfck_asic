@@ -33,10 +33,12 @@
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
 
+#include "bf_pins.h"
 #include "bf_run.h"
+#include "board.h"
 #include "clock.h"
+#include "ext.h"
 #include "spi_ram.h"
-#include "tt_pins.h"
 
 #define MAX_OPS 1024u /* ASIC PC is 10 bits */
 #define PC_TIMEOUT_US 200000u
@@ -50,6 +52,36 @@ static uint16_t match[MAX_OPS];
 static uint16_t n_ops;
 
 static jmp_buf bf_err; /* die() jumps here; set in bf_run_session() */
+
+/* Timings that follow the ASIC clock. The kit calls the hook on
+ * every clock change, so the hot serial loops read plain variables. */
+static uint32_t rx_settle_us;
+static uint32_t serial_half_us;
+
+void ext_clock_changed(uint32_t hz) {
+    (void)hz;
+    rx_settle_us = asic_clks_us(32u);
+    serial_half_us = asic_clks_us(6u);
+}
+
+/* Park extension hardware whenever the safe profile applies: core 1
+ * must never drive MISO while another design owns the uio pins. The
+ * CS pull-up is weak, cannot fight a driven pad, and keeps core 1
+ * idle when the BF design is not routed (see spi_ram.c). */
+void ext_pins_safe(void) {
+    spi_ram_set_enabled(false);
+    gpio_pull_up(PIN_SPI_CS);
+}
+
+/* BF pin roles on top of the safe profile; enables the core-1 SPI
+ * RAM. The 8 ui pins are already MCU outputs (instr, instr_valid,
+ * rx clk/bit, inspect_sel) and only MISO changes on the uio side. */
+void pins_bf(void) {
+    pins_safe();
+    gpio_put(PIN_SPI_MISO, 0);
+    gpio_set_dir(PIN_SPI_MISO, GPIO_OUT);
+    spi_ram_set_enabled(true);
+}
 
 /* ---- low-level pin access ---- */
 

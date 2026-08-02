@@ -24,7 +24,7 @@
 
 #include "pico/stdlib.h"
 #include "spi_ram.h"
-#include "tt_pins.h"
+#include "bf_pins.h"
 
 #define CMD_WRITE 0x02u
 #define CMD_READ 0x03u
