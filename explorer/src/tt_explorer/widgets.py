@@ -5,7 +5,15 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, DataTable, Input, Label, RichLog, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    Label,
+    RichLog,
+    Static,
+    TextArea,
+)
 
 from .index import Project
 
@@ -146,6 +154,8 @@ class UiPanel(Vertical):
 
     BORDER_TITLE = "ui_in — chip inputs"
 
+    _locked = 0  # bits the BF host owns while the BF design is loaded
+
     def compose(self) -> ComposeResult:
         with Horizontal(classes="bus-head"):
             yield Label("driven by ")
@@ -178,7 +188,9 @@ class UiPanel(Vertical):
         self.query_one("#ui-bus", CycleButton).set_state(
             "mcu" if mcu_drives else "ext")
         for i in range(8):
-            self.query_one(f"#ui{i}", CycleButton).disabled = not mcu_drives
+            locked = bool((self._locked >> i) & 1)
+            self.query_one(f"#ui{i}", CycleButton).disabled = (
+                not mcu_drives or locked)
             if mcu_drives:
                 self.query_one(f"#ui-lvl{i}", Static).update("·")
 
@@ -192,6 +204,15 @@ class UiPanel(Vertical):
         for i in range(8):
             self.query_one(f"#ui{i}", CycleButton).set_state("0")
         self.set_bus(True)
+
+    def lock_bits(self, mask: int) -> None:
+        """Pins the BF host owns: their value buttons stay disabled.
+        Pass 0 to unlock (non-BF designs)."""
+        self._locked = mask
+        mcu = self.query_one("#ui-bus", CycleButton).state == "mcu"
+        for i in range(8):
+            self.query_one(f"#ui{i}", CycleButton).disabled = (
+                not mcu or bool((mask >> i) & 1))
 
 
 class UoPanel(Vertical):
@@ -273,6 +294,13 @@ class UioPanel(Vertical):
         for i in range(8):
             self.query_one(f"#uio{i}", CycleButton).set_state("listen")
 
+    def lock_bits(self, mask: int) -> None:
+        """Pins the BF host or the design owns: buttons disabled,
+        level dots stay live. Pass 0 to unlock."""
+        for i in range(8):
+            self.query_one(f"#uio{i}", CycleButton).disabled = bool(
+                (mask >> i) & 1)
+
 
 class ClockPanel(Vertical):
     """The project clock. Exactly one of the two mode containers is
@@ -341,6 +369,50 @@ class ClockPanel(Vertical):
 
     def set_error(self, text: str) -> None:
         self.query_one("#clk-error", Static).update(text)
+
+
+class BfPanel(Vertical):
+    """BF program entry and session output, as a tab. While a program
+    runs, the firmware is in a raw byte stream and the command
+    protocol is unavailable, so the Bench freezes until the run ends;
+    between runs the Bench works as usual (inspect_sel included)."""
+
+    BORDER_TITLE = "brainf*ck"
+
+    def compose(self) -> ComposeResult:
+        yield Label("program — everything except + - < > [ ] , . is a "
+                    "comment; Run appends the '!' terminator",
+                    classes="hint")
+        yield TextArea(id="bf-program")
+        with Horizontal(id="bf-controls"):
+            yield Button("▶  Run on ASIC", id="bf-run")
+            yield Input(placeholder="input for ',' — sent raw on enter",
+                        id="bf-stdin", disabled=True)
+            yield Static("", id="bf-state")
+        yield RichLog(id="bf-output", markup=False, wrap=True)
+
+    def program(self) -> str:
+        return self.query_one("#bf-program", TextArea).text
+
+    def set_running(self, running: bool) -> None:
+        self.query_one("#bf-run", Button).disabled = running
+        self.query_one("#bf-stdin", Input).disabled = not running
+        state = self.query_one("#bf-state", Static)
+        if running:
+            state.update("● running — Bench frozen until the program ends")
+            state.set_class(True, "bf-running")
+
+    def show_result(self, ok: bool, detail: str) -> None:
+        state = self.query_one("#bf-state", Static)
+        state.set_class(False, "bf-running")
+        state.set_class(not ok, "bf-error")
+        state.update(detail)
+
+    def write_output(self, text: str) -> None:
+        self.query_one("#bf-output", RichLog).write(text)
+
+    def clear_output(self) -> None:
+        self.query_one("#bf-output", RichLog).clear()
 
 
 class ConsolePane(Vertical):

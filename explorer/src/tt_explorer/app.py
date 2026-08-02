@@ -17,11 +17,13 @@ from textual.widgets import (
     TabPane,
 )
 
+import re
+
 from . import index, protocol
-from .bf_screen import BfScreen
 from .index import Project
 from .serial_link import SerialLink, find_ports
 from .widgets import (
+    BfPanel,
     ClockPanel,
     ConsolePane,
     CycleButton,
@@ -33,6 +35,7 @@ from .widgets import (
 )
 
 MAX_HZ = 75_000_000  # clk_sys / 2, the firmware PWM ceiling
+BF_END = re.compile(r"(?:^|\n)(?:ok (done)|err ([a-z-]+))\s*$")
 BF_MAX_HZ = 200_000  # ASIC->MCU serial link bit-slips above this
 
 
@@ -107,8 +110,20 @@ class TTExplorerApp(App):
     ConsolePane { height: 1fr; border: round $accent; }
     #console-log { height: 1fr; }
 
-    #bf-banner { height: 1; padding: 0 1; }
-    #bf-banner.bf-error { color: $warning; text-style: bold; }
+    /* bf tab */
+    BfPanel { padding: 0 1; }
+    #bf-program { height: 10; }
+    #bf-controls { height: 1; margin: 1 0; }
+    #bf-run { border: none; height: 1; background: $success-darken-2; }
+    #bf-stdin {
+        width: 40; height: 1; border: none;
+        padding: 0 1; margin-left: 2; background: $boost;
+    }
+    #bf-stdin:focus { background: $primary-darken-2; }
+    #bf-state { margin-left: 2; color: $text-muted; }
+    #bf-state.bf-running { color: $success; }
+    #bf-state.bf-error { color: $warning; text-style: bold; }
+    #bf-output { height: 1fr; }
     """
 
     BINDINGS = [
@@ -129,6 +144,9 @@ class TTExplorerApp(App):
         self._ui_driving = True
         self._clk_running = True
         self._steps = 0
+        self._bf_active = False
+        self._bf_tail = ""
+        self._bf_end: tuple[bool, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -145,6 +163,8 @@ class TTExplorerApp(App):
                         yield UoPanel()
                         yield UioPanel()
                     yield ConsolePane()
+            with TabPane("BF", id="tab-bf"):
+                yield BfPanel()
         yield Footer()
 
     # -- startup --
@@ -233,10 +253,10 @@ class TTExplorerApp(App):
             self.query_one(UiPanel).set_bus(self._ui_driving)
 
     async def _poll(self) -> None:
+        if self._bf_end is not None:
+            await self._bf_finish()
         link = self.link
         if link is None or link.busy or link.raw:
-            return
-        if isinstance(self.screen, BfScreen):
             return
         try:
             reply = await link.request("uo", timeout=1.0)
@@ -260,24 +280,66 @@ class TTExplorerApp(App):
     def action_refresh_index(self) -> None:
         self.load_projects(refresh=True)
 
-    async def action_bf(self) -> None:
-        if self.link is None:
-            self._log("! not connected")
+    def action_bf(self) -> None:
+        self.query_one(TabbedContent).active = "tab-bf"
+        self.query_one("#bf-program").focus()
+
+    # -- BF sessions --
+
+    def _set_bench_frozen(self, frozen: bool) -> None:
+        for widget in (self.query_one(ClockPanel), self.query_one(UiPanel),
+                       self.query_one(UoPanel), self.query_one(UioPanel)):
+            widget.disabled = frozen
+        self.query_one("#console-input", Input).disabled = frozen
+
+    async def _bf_start(self) -> None:
+        if self.link is None or self._bf_active:
             return
+        panel = self.query_one(BfPanel)
         if self._design != self._bf_addr:
-            msg = ("BF runs on the Brainf*ck ASIC — select it on the "
-                   "Projects tab first")
-            self._log("! " + msg)
-            self.query_one(ClockPanel).set_error(msg)
+            panel.show_result(False, "load the Brainf*ck ASIC on the "
+                                     "Projects tab first")
             return
         if not self._clk_running or not 50_000 <= self._freq <= BF_MAX_HZ:
-            self._log("# BF needs a running clock at 50–200 kHz — "
+            self._log("# BF needs a running clock at 50-200 kHz — "
                       "setting 200 kHz")
             reply = await self._clock_send("freq 200000")
             if not (reply and reply.ok):
+                panel.show_result(False, "cannot set the clock — see console")
                 return
             await self._refresh_status()
-        self.push_screen(BfScreen(self.link))
+        program = panel.program()
+        if "!" not in program:
+            program += "!"
+        panel.clear_output()
+        panel.set_running(True)
+        self._set_bench_frozen(True)
+        self._bf_tail = ""
+        self._bf_end = None
+        self._bf_active = True
+        self.link.set_raw_sink(self._on_bf_chunk)
+        self.link.write_raw("bf\n")
+        self.link.write_raw(program)
+
+    def _on_bf_chunk(self, text: str) -> None:
+        self.query_one(BfPanel).write_output(text)
+        self._bf_tail = (self._bf_tail + text)[-96:]
+        m = BF_END.search(self._bf_tail.replace("\r", ""))
+        if m:
+            self._bf_end = (bool(m.group(1)), m.group(2) or "done")
+
+    async def _bf_finish(self) -> None:
+        ok, token = self._bf_end
+        self._bf_end = None
+        self._bf_active = False
+        if self.link:
+            self.link.set_raw_sink(None)
+        self._set_bench_frozen(False)
+        panel = self.query_one(BfPanel)
+        panel.set_running(False)
+        panel.show_result(ok, "✓ done — Bench live again" if ok
+                          else f"failed: {token} — see output above")
+        await self._refresh_status()
 
     async def action_toggle_clock(self) -> None:
         if self._clk_running:
@@ -326,6 +388,14 @@ class TTExplorerApp(App):
         self.query_one(UioPanel).set_names(p.pinout)
         self.query_one(UiPanel).reset()
         self.query_one(UioPanel).reset()
+        if p.address == self._bf_addr:
+            # the BF host owns instr/valid/rx (ui0-5) and the SPI pins;
+            # ui6/7 stay free: they are inspect_sel, useful between runs.
+            self.query_one(UiPanel).lock_bits(0x3F)
+            self.query_one(UioPanel).lock_bits(0xFF)
+        else:
+            self.query_one(UiPanel).lock_bits(0x00)
+            self.query_one(UioPanel).lock_bits(0x00)
         self._ui_driving = True
         if p.clock_hz:
             cap = BF_MAX_HZ if p.address == self._bf_addr else MAX_HZ
@@ -377,6 +447,8 @@ class TTExplorerApp(App):
             await self._refresh_status()
         elif bid.startswith("step-"):
             await self._do_step(int(bid.removeprefix("step-")))
+        elif bid == "bf-run":
+            await self._bf_start()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "freq-input":
@@ -386,6 +458,11 @@ class TTExplorerApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
+        if event.input.id == "bf-stdin":
+            if self._bf_active and event.value and self.link:
+                self.link.write_raw(event.value)
+                event.input.value = ""
+            return
         if event.input.id == "console-input":
             if value:
                 await self.send(value)
