@@ -31,6 +31,7 @@
 
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
+#include "pico/stdio_usb.h"
 #include "pico/stdlib.h"
 
 #include "bf_pins.h"
@@ -57,6 +58,20 @@ static jmp_buf bf_err; /* die() jumps here; set in bf_run_session() */
  * every clock change, so the hot serial loops read plain variables. */
 static uint32_t rx_settle_us;
 static uint32_t serial_half_us;
+
+/* Read one byte from the host, or -1 when the host disconnects.
+ * A plain getchar() blocks forever after the port closes, and the
+ * stuck session then eats the next connection's commands as
+ * session input. */
+static int host_getchar(void) {
+    for (;;) {
+        int c = getchar_timeout_us(100000);
+        if (c != PICO_ERROR_TIMEOUT)
+            return c;
+        if (!stdio_usb_connected())
+            return -1;
+    }
+}
 
 void ext_clock_changed(uint32_t hz) {
     (void)hz;
@@ -241,7 +256,9 @@ static bool read_program(void) {
     n_ops = 0;
     bool overflow = false;
     for (;;) {
-        int c = getchar();
+        int c = host_getchar();
+        if (c < 0)
+            return false; /* host gone, abort the session */
         if (c == '!' || c == 0x04)
             break;
         int op = op_of(c);
@@ -545,7 +562,9 @@ static inline void exec_one(bf_state_t *s) {
             s->executed++;
             if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for ','", s->pc);
-            int c = getchar(); /* blocks on USB CDC */
+            int c = host_getchar();
+            if (c < 0)
+                die("host disconnected during ','", s->pc);
             busy_wait_us(rx_settle_us);
             send10((uint16_t)(c & 0xFF));
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
@@ -679,7 +698,11 @@ const char *bf_debug_session(void) {
     printf("# dbg ready: n=step c=continue q=quit b<n>=breakpoint\n");
     print_dbg_state(&st);
     while (st.pc < n_ops) {
-        int ch = getchar();
+        int ch = host_getchar();
+        if (ch < 0) {
+            gpio_put(TT_PIN_LED, 0);
+            return "host-lost";
+        }
         if (ch == 'n') {
             exec_one(&st);
             print_dbg_state(&st);
