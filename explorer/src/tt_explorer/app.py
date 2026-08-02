@@ -106,6 +106,9 @@ class TTExplorerApp(App):
 
     ConsolePane { height: 1fr; border: round $accent; }
     #console-log { height: 1fr; }
+
+    #bf-banner { height: 1; padding: 0 1; }
+    #bf-banner.bf-error { color: $warning; text-style: bold; }
     """
 
     BINDINGS = [
@@ -121,6 +124,8 @@ class TTExplorerApp(App):
         self._port_arg = port
         self.link: SerialLink | None = None
         self._bf_addr: int | None = None
+        self._design: int | None = None
+        self._freq = 0
         self._ui_driving = True
         self._clk_running = True
         self._steps = 0
@@ -219,6 +224,9 @@ class TTExplorerApp(App):
             return
         st = protocol.parse_status(reply.payload)
         self._clk_running = st["mode"] == "run"
+        self._freq = st["freq"]
+        if st["design"] >= 0:
+            self._design = st["design"]
         self.query_one(ClockPanel).show_mode(st["mode"], st["freq"])
         if "uidrv" in st:
             self._ui_driving = bool(st["uidrv"])
@@ -252,10 +260,23 @@ class TTExplorerApp(App):
     def action_refresh_index(self) -> None:
         self.load_projects(refresh=True)
 
-    def action_bf(self) -> None:
+    async def action_bf(self) -> None:
         if self.link is None:
             self._log("! not connected")
             return
+        if self._design != self._bf_addr:
+            msg = ("BF runs on the Brainf*ck ASIC — select it on the "
+                   "Projects tab first")
+            self._log("! " + msg)
+            self.query_one(ClockPanel).set_error(msg)
+            return
+        if not self._clk_running or not 50_000 <= self._freq <= BF_MAX_HZ:
+            self._log("# BF needs a running clock at 50–200 kHz — "
+                      "setting 200 kHz")
+            reply = await self._clock_send("freq 200000")
+            if not (reply and reply.ok):
+                return
+            await self._refresh_status()
         self.push_screen(BfScreen(self.link))
 
     async def action_toggle_clock(self) -> None:
@@ -313,6 +334,7 @@ class TTExplorerApp(App):
         tabs = self.query_one(TabbedContent)
         tabs.get_tab("tab-bench").label = f"Bench · {p.title or p.macro}"
         tabs.active = "tab-bench"
+        self.set_focus(None)  # so keys like 'b' and space work at once
 
     async def on_cycle_button_cycled(self, event: CycleButton.Cycled) -> None:
         bid = event.button.id or ""
