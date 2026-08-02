@@ -3,7 +3,6 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
-#include "hardware/sync.h"
 #include "pico/stdlib.h"
 
 #include "tt_pins.h"
@@ -132,24 +131,52 @@ void asic_clk_stop(void) {
     if (clk_mode == CLK_STEP)
         return;
 
-    /* Freeze the state machine only while the output is low. A
-     * freeze in the high phase, or too near the falling edge, would
-     * make a runt pulse when the pin is then parked low. The
-     * interrupts-off window is only the read-back plus one register
-     * write. */
-    for (;;) {
-        while (!gpio_get(TT_PIN_PROJ_CLK))
-            tight_loop_contents();
-        while (gpio_get(TT_PIN_PROJ_CLK)) /* falling edge */
-            tight_loop_contents();
-        uint32_t save = save_and_disable_interrupts();
-        if (!gpio_get(TT_PIN_PROJ_CLK)) {
-            pio_sm_set_enabled(CLK_PIO, CLK_SM, false);
-            restore_interrupts(save);
-            break;
+    /* Let the PIO stop itself: rewrite the program's low-phase
+     * instruction into a jump-to-self with side 0. The state
+     * machine reaches it at a phase boundary and stays there, so
+     * the last high pulse keeps its full width and the pin parks
+     * low. CPU edge polling cannot do this: at short periods (a
+     * 4-cycle period at 40 MHz) the sampling loop aliases with the
+     * pin and can hang or freeze mid-phase. */
+    uint32_t sys = clock_get_hz(clk_sys);
+    uint64_t period = ((uint64_t)sys + clk_hz - 1) / clk_hz;
+    if (period <= FAST_MAX_PERIOD)
+        CLK_PIO->instr_mem[OFF_FAST + 1] =
+            pio_encode_jmp(OFF_FAST + 1) | side(0);
+    else
+        CLK_PIO->instr_mem[OFF_COUNTER + 0] =
+            pio_encode_jmp(OFF_COUNTER + 0) | side(0);
+
+    uint32_t period_us = (uint32_t)(period * 1000000ull / sys);
+    if (period_us < 100u) {
+        /* The state machine fetches the parked jump within one
+         * period. Wait two, then it is parked for sure. */
+        busy_wait_us(2u * period_us + 2u);
+    } else {
+        /* Slow clock: parked for sure once the pin stays low for
+         * more than a half period. A normal low phase never does,
+         * and at these periods the sampling loop is far faster
+         * than a phase, so it cannot alias. */
+        uint32_t confirm_us = period_us / 2u + 1u;
+        absolute_time_t low_since = nil_time;
+        for (;;) {
+            if (gpio_get(TT_PIN_PROJ_CLK)) {
+                low_since = nil_time;
+            } else if (is_nil_time(low_since)) {
+                low_since = get_absolute_time();
+            } else if (absolute_time_diff_us(low_since,
+                                             get_absolute_time())
+                       > confirm_us) {
+                break;
+            }
         }
-        restore_interrupts(save); /* an IRQ delayed us a full phase; retry */
     }
+    pio_sm_set_enabled(CLK_PIO, CLK_SM, false);
+
+    /* Put the rewritten slot back for the next start. The fast
+     * slots are rewritten by asic_clk_set_hz anyway. */
+    CLK_PIO->instr_mem[OFF_COUNTER + 0] =
+        pio_encode_mov(pio_x, pio_y) | side(0);
 
     /* Park low. The exec runs even while the SM is disabled. */
     pio_sm_exec(CLK_PIO, CLK_SM, pio_encode_set(pio_pins, 0) | side(0));
