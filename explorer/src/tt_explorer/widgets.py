@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
@@ -80,6 +82,11 @@ def _dot(level: int) -> str:
 class ProjectList(Vertical):
     """Filterable table of shuttle projects."""
 
+    class Highlighted(Message):
+        def __init__(self, project: Project) -> None:
+            self.project = project
+            super().__init__()
+
     class Selected(Message):
         def __init__(self, project: Project) -> None:
             self.project = project
@@ -92,6 +99,10 @@ class ProjectList(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="filter projects…", id="project-filter")
+        with Horizontal(id="addr-row"):
+            yield Label("or load a mux address directly: ")
+            yield Input(placeholder="0-1023", id="addr-input")
+            yield Button("Load", id="addr-load")
         yield DataTable(id="project-table", cursor_type="row")
 
     def on_mount(self) -> None:
@@ -122,6 +133,14 @@ class ProjectList(Vertical):
             or needle in p.macro.lower() or needle in str(p.address)
         ])
 
+    def on_data_table_row_highlighted(
+            self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None or event.row_key.value is None:
+            return
+        project = self._by_address.get(int(event.row_key.value))
+        if project:
+            self.post_message(self.Highlighted(project))
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         project = self._by_address.get(int(event.row_key.value))
         if project:
@@ -144,7 +163,8 @@ class DetailPane(VerticalScroll):
         ]
         if p.clock_hz:
             lines += ["", f"intended clock: {p.clock_hz:,} Hz"]
-        lines += ["", "[dim]select (enter) to load it on the Bench[/dim]"]
+        lines += ["", "[dim]press enter (or click the row again) to load "
+                  "it on the Bench[/dim]"]
         self.query_one("#detail-text", Static).update("\n".join(lines))
 
 
@@ -152,7 +172,7 @@ class UiPanel(Vertical):
     """The 8 chip inputs. Either the MCU drives them (value buttons)
     or the bus is released so the DIP switches / PMOD drive."""
 
-    BORDER_TITLE = "ui_in — chip inputs"
+    BORDER_TITLE = "ui_in (chip inputs)"
 
     _locked = 0  # bits the BF host owns while the BF design is loaded
 
@@ -219,7 +239,7 @@ class UoPanel(Vertical):
     """The 8 chip outputs, plus a mirror of the board's 7-segment
     display (which is permanently wired to this bus)."""
 
-    BORDER_TITLE = "uo_out — chip outputs (live)"
+    BORDER_TITLE = "uo_out (chip outputs, live)"
 
     def compose(self) -> ComposeResult:
         for i in range(8):
@@ -250,11 +270,11 @@ class UioPanel(Vertical):
     pin (uio_oe); these buttons set only the MCU side. Check the pin
     name before driving one."""
 
-    BORDER_TITLE = "uio — bidirectional (MCU side)"
+    BORDER_TITLE = "uio (bidirectional, MCU side)"
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="bus-head"):
-            yield Label("design owns its side — drive inputs only")
+            yield Label("design owns its side, drive inputs only")
         for i in range(8):
             with Horizontal(classes="pin-row"):
                 yield Label(str(i), classes="pin-bit")
@@ -280,10 +300,28 @@ class UioPanel(Vertical):
                 v |= 1 << i
         return v
 
+    @staticmethod
+    def _dir_hint(name: str) -> str | None:
+        """Guess the design's side from naming conventions."""
+        tokens = re.split(r"[^a-z0-9]+", name.lower())
+        if "out" in tokens or "output" in tokens:
+            return "out"
+        if "in" in tokens or "input" in tokens:
+            return "in"
+        return None
+
     def set_names(self, pinout: dict[str, str]) -> None:
         for i in range(8):
-            self.query_one(f"#uio-name{i}", Label).update(
-                pinout.get(f"uio[{i}]", "") or "")
+            name = pinout.get(f"uio[{i}]", "") or ""
+            label = self.query_one(f"#uio-name{i}", Label)
+            hint = self._dir_hint(name)
+            label.set_class(hint == "out", "pin-designout")
+            if hint == "out":
+                label.update(f"{name}  ⚠ design output")
+            elif hint == "in":
+                label.update(f"{name}  (design input)")
+            else:
+                label.update(name)
 
     def show(self, value: int) -> None:
         for i in range(8):
@@ -327,11 +365,11 @@ class ClockPanel(Vertical):
                 yield Label("presets: ")
                 for hz, label in self.PRESETS:
                     yield Button(label, id=f"preset-{hz}", classes="preset")
-            yield Label("1 Hz – 75 MHz · BF programs need ≤ 200 kHz "
-                        "(serial link limit)", classes="hint")
+            yield Label("1 Hz – 75 MHz (PIO, exact) · BF programs need "
+                        "≤ 200 kHz (serial link limit)", classes="hint")
         with Vertical(id="clk-step"):
             with Horizontal(classes="clk-line"):
-                yield Static("⏸ STOPPED — single-step mode",
+                yield Static("⏸ STOPPED (single-step mode)",
                              id="clk-step-state")
                 yield Static("stepped 0", id="step-total")
             with Horizontal(classes="clk-line"):
@@ -340,7 +378,9 @@ class ClockPanel(Vertical):
                 yield Button("Step 100", id="step-100")
                 yield Button("▶  Resume clock", id="clk-resume")
             yield Label("space = step 1 · s = resume", classes="hint")
-        yield Static("", id="clk-error")
+        with Horizontal(classes="clk-line"):
+            yield Button("⟳ Reset design", id="proj-reset")
+            yield Static("", id="clk-error")
 
     def on_mount(self) -> None:
         """One mode container at a time, before the first status too."""
@@ -380,14 +420,14 @@ class BfPanel(Vertical):
     BORDER_TITLE = "brainf*ck"
 
     def compose(self) -> ComposeResult:
-        yield Label("program — everything except + - < > [ ] , . is a "
-                    "comment; Run appends the '!' terminator",
+        yield Label("program: everything except + - < > [ ] , . is a "
+                    "comment. Run appends the '!' terminator",
                     classes="hint")
         yield TextArea(id="bf-program")
         with Horizontal(id="bf-controls"):
             yield Button("▶  Run on ASIC", id="bf-run")
             yield Button("⏯  Debug", id="bf-debug")
-            yield Input(placeholder="input for ',' — sent raw on enter",
+            yield Input(placeholder="input for ',', sent raw on enter",
                         id="bf-stdin", disabled=True)
             yield Static("", id="bf-state")
         with Horizontal(id="bf-dbg-controls"):
@@ -430,9 +470,9 @@ class BfPanel(Vertical):
         self.query_one("#bf-dbg-controls").display = running and debug
         state = self.query_one("#bf-state", Static)
         if running:
-            state.update("● stepping — Bench frozen until the session ends"
+            state.update("● stepping, Bench frozen until the session ends"
                          if debug else
-                         "● running — Bench frozen until the program ends")
+                         "● running, Bench frozen until the program ends")
             state.set_class(True, "bf-running")
 
     def show_dbg(self, fields: dict[str, str]) -> None:

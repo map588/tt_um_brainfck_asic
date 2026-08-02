@@ -73,3 +73,14 @@ def test_parse_hz():
     assert parse_hz("") is None
     assert parse_hz("fast") is None
     assert parse_hz("0") is None
+
+
+def test_uio_direction_hint():
+    from tt_explorer.widgets import UioPanel
+    hint = UioPanel._dir_hint
+    assert hint("dac_wr_OUT (active low)") == "out"
+    assert hint("CONFIG ADDR_0_IN") == "in"
+    assert hint("DATA_INPUT_3") == "in"
+    assert hint("segment output g") == "out"
+    assert hint("spi_cs") is None
+    assert hint("") is None

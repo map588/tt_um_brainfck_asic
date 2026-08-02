@@ -110,6 +110,16 @@ class TTExplorerApp(App):
     ConsolePane { height: 1fr; border: round $accent; }
     #console-log { height: 1fr; }
 
+    /* projects tab extras */
+    #addr-row { height: 1; margin-bottom: 1; }
+    #addr-input { width: 10; height: 1; border: none;
+                  padding: 0 1; background: $boost; }
+    #addr-input:focus { background: $primary-darken-2; }
+    #addr-load { border: none; height: 1; }
+
+    #proj-reset { background: $panel-lighten-1; }
+    .pin-designout { color: $warning; }
+
     /* bf tab */
     BfPanel { padding: 0 1; }
     BfPanel Button { border: none; height: 1; margin-right: 2; }
@@ -202,7 +212,7 @@ class TTExplorerApp(App):
     async def _connect(self) -> None:
         ports = [self._port_arg] if self._port_arg else find_ports()
         if not ports:
-            self._log("! no serial port found — is the board plugged in?")
+            self._log("! no serial port found. Is the board plugged in?")
             return
         try:
             self.link = SerialLink(ports[0], on_line=self._log)
@@ -230,7 +240,7 @@ class TTExplorerApp(App):
             self._log(f"! timeout waiting for reply to {cmd!r}")
             return None
         except OSError as exc:
-            self._log(f"! serial error: {exc} — is the board still plugged in?")
+            self._log(f"! serial error: {exc}. Is the board still plugged in?")
             return None
         prefix = "ok" if reply.ok else "err"
         self._log(f"{prefix} {reply.payload}".rstrip())
@@ -393,7 +403,7 @@ class TTExplorerApp(App):
         hz = parse_hz(text)
         if hz is None:
             self.query_one(ClockPanel).set_error(
-                f"cannot read {text!r} — try 440, 32k, or 1.5M")
+                f"cannot read {text!r}, try 440, 32k, or 1.5M")
             return
         await self._clock_send(f"freq {hz}")
         await self._refresh_status()
@@ -406,8 +416,27 @@ class TTExplorerApp(App):
 
     # -- UI events --
 
+    def on_project_list_highlighted(
+            self, event: ProjectList.Highlighted) -> None:
+        """Browsing preview: details only, nothing sent to the board."""
+        self.query_one(DetailPane).show(event.project)
+
     async def on_project_list_selected(self, event: ProjectList.Selected) -> None:
-        p: Project = event.project
+        await self._load_design(event.project)
+
+    async def _load_by_address(self) -> None:
+        text = self.query_one("#addr-input", Input).value.strip()
+        if not text.isdigit() or not 0 <= int(text) <= 1023:
+            self._log("! address must be 0-1023")
+            return
+        address = int(text)
+        pl = self.query_one(ProjectList)
+        project = pl._by_address.get(address) or Project(
+            macro=f"design {address}", address=address,
+            title=f"design {address}")
+        await self._load_design(project)
+
+    async def _load_design(self, p: Project) -> None:
         self.query_one(DetailPane).show(p)
         reply = await self.send(f"design {p.address}")
         if not (reply and reply.ok):
@@ -476,6 +505,10 @@ class TTExplorerApp(App):
             await self._refresh_status()
         elif bid.startswith("step-"):
             await self._do_step(int(bid.removeprefix("step-")))
+        elif bid == "proj-reset":
+            await self.send("reset")
+        elif bid == "addr-load":
+            await self._load_by_address()
         elif bid == "bf-run":
             await self._bf_start()
         elif bid == "bf-debug":
@@ -516,7 +549,9 @@ class TTExplorerApp(App):
                 self.link.write_raw(event.value)
                 event.input.value = ""
             return
-        if event.input.id == "console-input":
+        if event.input.id == "addr-input":
+            await self._load_by_address()
+        elif event.input.id == "console-input":
             if value:
                 await self.send(value)
                 event.input.value = ""

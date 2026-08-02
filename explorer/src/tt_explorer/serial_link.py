@@ -66,9 +66,14 @@ class SerialLink:
     def close(self) -> None:
         self._closed = True
         try:
+            self._ser.cancel_read()  # wake the reader thread
+        except (OSError, AttributeError):
+            pass
+        try:
             self._ser.close()
         except OSError:
             pass
+        self._thread.join(timeout=1.0)
 
     # -- raw mode (BF passthrough) --
 
