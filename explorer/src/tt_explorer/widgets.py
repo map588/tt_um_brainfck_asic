@@ -386,21 +386,42 @@ class BfPanel(Vertical):
         yield TextArea(id="bf-program")
         with Horizontal(id="bf-controls"):
             yield Button("▶  Run on ASIC", id="bf-run")
+            yield Button("⏯  Debug", id="bf-debug")
             yield Input(placeholder="input for ',' — sent raw on enter",
                         id="bf-stdin", disabled=True)
             yield Static("", id="bf-state")
+        with Horizontal(id="bf-dbg-controls"):
+            yield Button("⏵ Step", id="bf-step")
+            yield Button("▶ Continue", id="bf-cont")
+            yield Button("✖ Stop", id="bf-abort")
+            yield Static("", id="bf-dbg-state")
         yield RichLog(id="bf-output", markup=False, wrap=True)
+
+    def on_mount(self) -> None:
+        self.query_one("#bf-dbg-controls").display = False
 
     def program(self) -> str:
         return self.query_one("#bf-program", TextArea).text
 
-    def set_running(self, running: bool) -> None:
+    def set_running(self, running: bool, debug: bool = False) -> None:
         self.query_one("#bf-run", Button).disabled = running
+        self.query_one("#bf-debug", Button).disabled = running
         self.query_one("#bf-stdin", Input).disabled = not running
+        self.query_one("#bf-dbg-controls").display = running and debug
         state = self.query_one("#bf-state", Static)
         if running:
-            state.update("● running — Bench frozen until the program ends")
+            state.update("● stepping — Bench frozen until the session ends"
+                         if debug else
+                         "● running — Bench frozen until the program ends")
             state.set_class(True, "bf-running")
+
+    def show_dbg(self, fields: dict[str, str]) -> None:
+        line = (f"pc {fields.get('pc', '?')} · next '{fields.get('op', '?')}'"
+                f" · cell[{fields.get('vptr', '?')}] ="
+                f" 0x{fields.get('data', '??')}"
+                f" · bstack 0x{fields.get('bstk', '??')}"
+                f" · executed {fields.get('exec', '?')}")
+        self.query_one("#bf-dbg-state", Static).update(line)
 
     def show_result(self, ok: bool, detail: str) -> None:
         state = self.query_one("#bf-state", Static)

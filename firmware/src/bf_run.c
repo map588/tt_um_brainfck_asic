@@ -353,194 +353,206 @@ static void synth_in(uint8_t byte, uint8_t apc_next, uint16_t pc) {
         die("synthetic ',' never retired", pc);
 }
 
-static void run(void) {
-    uint16_t pc = 0;     /* program index */
-    uint16_t apc = 0;    /* model of the ASIC's PC (drifts from pc) */
-    uint16_t vptr = 0;   /* logical tape pointer */
+typedef struct {
+    uint16_t pc;         /* program index */
+    uint16_t apc;        /* model of the ASIC's PC (drifts from pc) */
+    uint16_t vptr;       /* logical tape pointer */
     uint16_t abstack[8]; /* ASIC PC values it pushed for '[' */
-    uint sp = 0;
-    uint32_t executed = 0;
+    uint sp;
+    uint32_t executed;
+} bf_state_t;
 
+static void state_init(bf_state_t *s) {
+    memset(s, 0, sizeof *s);
     memset(vtape, 0, sizeof vtape);
     set_inspect_sel(INSPECT_PC);
+}
 
-    while (pc < n_ops) {
-        uint8_t op = ops[pc];
-        uint8_t anext = (uint8_t)(apc + 1); /* ASIC PC low byte after op */
+/* Execute the one instruction at s->pc. Calls die() (longjmp) on a
+ * handshake failure. Inline so the run loop pays no call cost. */
+static inline void exec_one(bf_state_t *s) {
+    {
+        uint8_t op = ops[s->pc];
+        uint8_t anext = (uint8_t)(s->apc + 1); /* ASIC PC low byte after op */
 
         switch (op) {
         case OP_SUB:
         case OP_ADD:
             feed_instr(op);
-            executed++;
+            s->executed++;
             if (!wait_pc_low(anext, PC_TIMEOUT_US))
-                die("timeout waiting for op to retire", pc);
-            apc++;
-            pc++;
+                die("timeout waiting for op to retire", s->pc);
+            s->apc++;
+            s->pc++;
             break;
 
         case OP_LEFT:
         case OP_RIGHT: {
-            uint16_t nv = vptr;
+            uint16_t nv = s->vptr;
             if (op == OP_RIGHT) {
-                if (vptr < 1023)
-                    nv = vptr + 1;
+                if (s->vptr < 1023)
+                    nv = s->vptr + 1;
             } else {
-                if (vptr > 0)
-                    nv = vptr - 1;
+                if (s->vptr > 0)
+                    nv = s->vptr - 1;
             }
-            if (nv == vptr) { /* blocked at a tape edge: pure no-op */
-                pc++;
+            if (nv == s->vptr) { /* blocked at a tape edge: pure no-op */
+                s->pc++;
                 break;
             }
-            if (vptr <= NATIVE_LIMIT && nv <= NATIVE_LIMIT) {
+            if (s->vptr <= NATIVE_LIMIT && nv <= NATIVE_LIMIT) {
                 /* Native move inside the cache window. Crossing
                  * logical 3<->4 takes two physical moves (transit
                  * through the broken physical cell 4). */
-                uint pa = phys_of(vptr), pb = phys_of(nv);
+                uint pa = phys_of(s->vptr), pb = phys_of(nv);
                 uint moves = pb > pa ? pb - pa : pa - pb;
                 while (moves--) {
                     feed_instr(op);
-                    executed++;
-                    if (!wait_pc_low((uint8_t)(apc + 1), PC_TIMEOUT_US))
-                        die("timeout waiting for op to retire", pc);
-                    apc++;
+                    s->executed++;
+                    if (!wait_pc_low((uint8_t)(s->apc + 1), PC_TIMEOUT_US))
+                        die("timeout waiting for op to retire", s->pc);
+                    s->apc++;
                 }
             } else {
                 /* Virtual move: save the current cell, load the target
                  * cell. The ASIC's ptr stays parked at the window edge. */
-                vtape[vptr] = synth_out(anext, pc);
-                apc++;
-                synth_in(vtape[nv], (uint8_t)(apc + 1), pc);
-                apc++;
-                executed += 2;
+                vtape[s->vptr] = synth_out(anext, s->pc);
+                s->apc++;
+                synth_in(vtape[nv], (uint8_t)(s->apc + 1), s->pc);
+                s->apc++;
+                s->executed += 2;
             }
-            vptr = nv;
-            pc++;
+            s->vptr = nv;
+            s->pc++;
             break;
         }
 
         case OP_OPEN: {
             feed_instr(op);
-            executed++;
+            s->executed++;
             event_t ev = await_pc_or_irq(anext, PIN_IRQ_JUMP, PC_TIMEOUT_US);
             if (ev == EV_PC_ADVANCED) { /* data!=0: entered loop */
-                if (sp < count_of(abstack))
-                    abstack[sp] = apc;
-                sp++;
-                apc++;
-                pc++;
+                if (s->sp < count_of(s->abstack))
+                    s->abstack[s->sp] = s->apc;
+                s->sp++;
+                s->apc++;
+                s->pc++;
             } else if (ev == EV_IRQ) { /* data==0: ASIC wants skip target */
-                /* The ASIC pushed apc. Send apc back so its PC does not
+                /* The ASIC pushed s->apc. Send s->apc back so its PC does not
                  * move, then run the matching ']' (data==0: pops). */
                 busy_wait_us(rx_settle_us);
-                send10(apc & 0x3FF);
+                send10(s->apc & 0x3FF);
                 if (!wait_gpio_low(PIN_IRQ_JUMP, SERIAL_TIMEOUT_US))
-                    die("interrupt_jump stuck after skip", pc);
-                if (!wait_pc_low((uint8_t)apc, PC_TIMEOUT_US))
-                    die("PC never reached skip target", pc);
-                if (sp < count_of(abstack))
-                    abstack[sp] = apc;
-                sp++;
-                pc = match[pc];
+                    die("interrupt_jump stuck after skip", s->pc);
+                if (!wait_pc_low((uint8_t)s->apc, PC_TIMEOUT_US))
+                    die("PC never reached skip target", s->pc);
+                if (s->sp < count_of(s->abstack))
+                    s->abstack[s->sp] = s->apc;
+                s->sp++;
+                s->pc = match[s->pc];
             } else {
-                die("no response to '['", pc);
+                die("no response to '['", s->pc);
             }
             break;
         }
 
         case OP_CLOSE: {
             feed_instr(op);
-            executed++;
+            s->executed++;
             event_t ev = await_pc_or_irq(anext, PIN_IRQ_JUMP, PC_TIMEOUT_US);
             if (ev == EV_PC_ADVANCED) { /* data==0: exited loop */
-                if (sp)
-                    sp--;
-                apc++;
-                pc++;
+                if (s->sp)
+                    s->sp--;
+                s->apc++;
+                s->pc++;
             } else if (ev == EV_IRQ) { /* data!=0: ASIC transmits target */
                 int tgt = recv10(SERIAL_TIMEOUT_US);
                 if (tgt < 0)
-                    die("no jump target transmitted for ']'", pc);
-                drain_phantom(pc);
+                    die("no jump target transmitted for ']'", s->pc);
+                drain_phantom(s->pc);
                 if (!wait_gpio_low(PIN_IRQ_JUMP, SERIAL_TIMEOUT_US))
-                    die("interrupt_jump stuck after ']'", pc);
-                if (sp && (uint16_t)tgt != (abstack[sp - 1] & 0x3FF))
+                    die("interrupt_jump stuck after ']'", s->pc);
+                if (s->sp && (uint16_t)tgt != (s->abstack[s->sp - 1] & 0x3FF))
                     printf("# !! ']' at %u jumped to %d, expected %u "
                            "(bracket stack desync?)\n",
-                           pc, tgt, abstack[sp - 1] & 0x3FF);
+                           s->pc, tgt, s->abstack[s->sp - 1] & 0x3FF);
                 uint16_t back;
-                if (sp >= 2) {
+                if (s->sp >= 2) {
                     /* Silicon: the WAIT_JUMP start branch fires twice
                      * before tx_busy rises, so the ASIC pops TWO
                      * entries and its PC ends at the second one. */
-                    sp -= 2;
-                    back = abstack[sp];
+                    s->sp -= 2;
+                    back = s->abstack[s->sp];
                     if (!wait_pc_low((uint8_t)back, PC_TIMEOUT_US))
-                        die("PC never reached jump target", pc);
-                    apc = back;
+                        die("PC never reached jump target", s->pc);
+                    s->apc = back;
                     /* Restore the lost entry with a synthetic '[' —
                      * data is not zero here, so it pushes and advances. */
                     feed_instr(OP_OPEN);
-                    executed++;
-                    if (await_pc_or_irq((uint8_t)(apc + 1), PIN_IRQ_JUMP,
+                    s->executed++;
+                    if (await_pc_or_irq((uint8_t)(s->apc + 1), PIN_IRQ_JUMP,
                                         PC_TIMEOUT_US) != EV_PC_ADVANCED)
-                        die("synthetic '[' did not push", pc);
-                    abstack[sp++] = apc;
-                    apc++;
+                        die("synthetic '[' did not push", s->pc);
+                    s->abstack[s->sp++] = s->apc;
+                    s->apc++;
                 } else {
-                    back = sp ? abstack[--sp] : 0;
+                    back = s->sp ? s->abstack[--s->sp] : 0;
                     if (!wait_pc_low((uint8_t)back, PC_TIMEOUT_US))
-                        die("PC never reached jump target", pc);
-                    apc = back;
+                        die("PC never reached jump target", s->pc);
+                    s->apc = back;
                 }
-                pc = match[pc]; /* the matching '[' re-executes */
+                s->pc = match[s->pc]; /* the matching '[' re-executes */
             } else {
-                die("no response to ']'", pc);
+                die("no response to ']'", s->pc);
             }
             break;
         }
 
         case OP_IN: {
             feed_instr(op);
-            executed++;
+            s->executed++;
             if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
-                die("no interrupt_io for ','", pc);
+                die("no interrupt_io for ','", s->pc);
             int c = getchar(); /* blocks on USB CDC */
             busy_wait_us(rx_settle_us);
             send10((uint16_t)(c & 0xFF));
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
-                die("interrupt_io stuck after ','", pc);
+                die("interrupt_io stuck after ','", s->pc);
             if (!wait_pc_low(anext, PC_TIMEOUT_US))
-                die("',' never retired", pc);
-            apc++;
-            pc++;
+                die("',' never retired", s->pc);
+            s->apc++;
+            s->pc++;
             break;
         }
 
         case OP_OUT: {
             feed_instr(op);
-            executed++;
+            s->executed++;
             if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
-                die("no interrupt_io for '.'", pc);
+                die("no interrupt_io for '.'", s->pc);
             int v = recv10(SERIAL_TIMEOUT_US);
             if (v < 0)
-                die("no data transmitted for '.'", pc);
-            drain_phantom(pc);
+                die("no data transmitted for '.'", s->pc);
+            drain_phantom(s->pc);
             putchar(v & 0xFF);
             stdio_flush();
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
-                die("interrupt_io stuck after '.'", pc);
+                die("interrupt_io stuck after '.'", s->pc);
             if (!wait_pc_low(anext, PC_TIMEOUT_US))
-                die("'.' never retired", pc);
-            apc++;
-            pc++;
+                die("'.' never retired", s->pc);
+            s->apc++;
+            s->pc++;
             break;
         }
         }
     }
+}
 
-    printf("\n# halted: %lu instructions executed\n", (unsigned long)executed);
+static void run(bf_state_t *s) {
+    while (s->pc < n_ops)
+        exec_one(s);
+    printf("\n# halted: %lu instructions executed\n",
+           (unsigned long)s->executed);
 }
 
 const char *bf_run_session(void) {
@@ -551,11 +563,76 @@ const char *bf_run_session(void) {
     asic_reset();
 
     gpio_put(TT_PIN_LED, 1);
+    bf_state_t st;
+    state_init(&st);
     const char *result = NULL;
     if (setjmp(bf_err))
         result = "run-fail";
     else
-        run();
+        run(&st);
     gpio_put(TT_PIN_LED, 0);
     return result;
+}
+
+/* ---- instruction-level debugger ---- */
+
+/* Read one inspect value with the mux settled. */
+static uint8_t inspect_read(uint sel) {
+    set_inspect_sel(sel);
+    busy_wait_us(asic_clks_us(4u));
+    return inspect_from(gpio_snapshot());
+}
+
+/* One machine-parseable state line per step. inspect_sel returns to
+ * PC afterward: the retirement handshake depends on it. */
+static void print_dbg_state(const bf_state_t *s) {
+    uint8_t data = inspect_read(INSPECT_DATA);
+    uint8_t bstk = inspect_read(INSPECT_BSTACK);
+    set_inspect_sel(INSPECT_PC);
+    busy_wait_us(asic_clks_us(4u));
+    printf("# dbg pc=%u op=%c vptr=%u data=%02x bstk=%02x exec=%lu\n",
+           s->pc, s->pc < n_ops ? OP_CHAR[ops[s->pc]] : '-', s->vptr, data,
+           bstk, (unsigned long)s->executed);
+    stdio_flush();
+}
+
+/* Like bf_run_session(), but the host paces execution: 'n' runs one
+ * instruction, 'c' runs to the end, 'q' stops the session. */
+const char *bf_debug_session(void) {
+    if (!read_program())
+        return "bad-program";
+    if (!build_jump_table())
+        return "bad-program";
+    asic_reset();
+
+    gpio_put(TT_PIN_LED, 1);
+    bf_state_t st;
+    state_init(&st);
+    if (setjmp(bf_err)) {
+        gpio_put(TT_PIN_LED, 0);
+        return "run-fail";
+    }
+    printf("# dbg ready: n=step c=continue q=quit\n");
+    print_dbg_state(&st);
+    while (st.pc < n_ops) {
+        int ch = getchar();
+        if (ch == 'n') {
+            exec_one(&st);
+            print_dbg_state(&st);
+        } else if (ch == 'c') {
+            run(&st); /* prints the halted line */
+            gpio_put(TT_PIN_LED, 0);
+            return NULL;
+        } else if (ch == 'q') {
+            gpio_put(TT_PIN_LED, 0);
+            printf("# dbg stopped by host\n");
+            return NULL;
+        }
+        /* other bytes (line ends and so on) are ignored */
+    }
+    if (st.pc >= n_ops)
+        printf("\n# halted: %lu instructions executed\n",
+               (unsigned long)st.executed);
+    gpio_put(TT_PIN_LED, 0);
+    return NULL;
 }

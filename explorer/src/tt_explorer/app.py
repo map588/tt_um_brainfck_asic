@@ -121,6 +121,11 @@ class TTExplorerApp(App):
     }
     #bf-stdin:focus { background: $primary-darken-2; }
     #bf-state { margin-left: 2; color: $text-muted; }
+    #bf-dbg-controls { height: 1; margin-bottom: 1; }
+    #bf-step { background: $primary-darken-1; }
+    #bf-cont { background: $success-darken-2; }
+    #bf-abort { background: $warning-darken-2; }
+    #bf-dbg-state { margin-left: 2; color: $success; text-style: bold; }
     #bf-state.bf-running { color: $success; }
     #bf-state.bf-error { color: $warning; text-style: bold; }
     #bf-output { height: 1fr; }
@@ -145,7 +150,9 @@ class TTExplorerApp(App):
         self._clk_running = True
         self._steps = 0
         self._bf_active = False
+        self._bf_debug = False
         self._bf_tail = ""
+        self._bf_linebuf = ""
         self._bf_end: tuple[bool, str] | None = None
 
     def compose(self) -> ComposeResult:
@@ -292,7 +299,7 @@ class TTExplorerApp(App):
             widget.disabled = frozen
         self.query_one("#console-input", Input).disabled = frozen
 
-    async def _bf_start(self) -> None:
+    async def _bf_start(self, debug: bool = False) -> None:
         if self.link is None or self._bf_active:
             return
         panel = self.query_one(BfPanel)
@@ -312,17 +319,30 @@ class TTExplorerApp(App):
         if "!" not in program:
             program += "!"
         panel.clear_output()
-        panel.set_running(True)
+        panel.set_running(True, debug)
         self._set_bench_frozen(True)
         self._bf_tail = ""
+        self._bf_linebuf = ""
         self._bf_end = None
         self._bf_active = True
+        self._bf_debug = debug
         self.link.set_raw_sink(self._on_bf_chunk)
-        self.link.write_raw("bf\n")
+        self.link.write_raw("bfdbg\n" if debug else "bf\n")
         self.link.write_raw(program)
 
     def _on_bf_chunk(self, text: str) -> None:
-        self.query_one(BfPanel).write_output(text)
+        panel = self.query_one(BfPanel)
+        panel.write_output(text)
+        if self._bf_debug:
+            self._bf_linebuf += text
+            while "\n" in self._bf_linebuf:
+                line, self._bf_linebuf = self._bf_linebuf.split("\n", 1)
+                line = line.strip()
+                if line.startswith("# dbg pc="):
+                    fields = dict(part.split("=", 1)
+                                  for part in line[6:].split()
+                                  if "=" in part)
+                    panel.show_dbg(fields)
         self._bf_tail = (self._bf_tail + text)[-96:]
         m = BF_END.search(self._bf_tail.replace("\r", ""))
         if m:
@@ -449,6 +469,12 @@ class TTExplorerApp(App):
             await self._do_step(int(bid.removeprefix("step-")))
         elif bid == "bf-run":
             await self._bf_start()
+        elif bid == "bf-debug":
+            await self._bf_start(debug=True)
+        elif bid in ("bf-step", "bf-cont", "bf-abort") and self._bf_active:
+            if self.link:
+                self.link.write_raw(
+                    {"bf-step": "n", "bf-cont": "c", "bf-abort": "q"}[bid])
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "freq-input":

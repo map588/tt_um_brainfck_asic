@@ -23,7 +23,9 @@ labeled row per pin on all three buses with the design's own pin
 names, a mirror of the board's 7-segment display, and the serial
 console. "BF" is the program tab for the Brainf*ck ASIC: type or
 paste a program, press Run, feed ',' input through the field beside
-it. While a program runs the firmware is in a raw byte stream, so
+it, or press Debug to step the program one instruction at a time
+with live pc / cell / bracket-stack state between steps. While a
+program or debug session runs the firmware is in a raw byte stream, so
 the Bench freezes; between runs the Bench is fully live — including
 the inspect_sel pins (ui6/7), which stay unlocked for state
 inspection. Pins the BF host owns (ui0-5 and the uio bus) are locked

@@ -246,9 +246,7 @@ static const char *cmd_uiow(int argc, char **argv) {
     return NULL;
 }
 
-static const char *cmd_bf(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+static const char *bf_precheck(void) {
     if (current_design != (int)BF_DESIGN_ADDR)
         return "not-bf-design";
     if (clk_mode != CLK_RUN)
@@ -257,11 +255,19 @@ static const char *cmd_bf(int argc, char **argv) {
         return "too-slow";
     if (clk_hz > BF_MAX_HZ)
         return "too-fast";
+    return NULL;
+}
+
+static const char *bf_common(const char *banner,
+                             const char *(*session)(void)) {
+    const char *err = bf_precheck();
+    if (err)
+        return err;
     pins_bf();
     bf_armed = true;
     ui_driven = true; /* pins_bf drives the ui pins */
-    printf("ok bf\n");
-    const char *err = bf_run_session();
+    printf("ok %s\n", banner);
+    err = session();
     /* Drain input the program did not consume (e.g. ',' bytes left
      * over after an error) so it cannot pollute the next command. */
     while (getchar_timeout_us(100000) != PICO_ERROR_TIMEOUT)
@@ -270,6 +276,18 @@ static const char *cmd_bf(int argc, char **argv) {
         return err;
     strcpy(reply, "done");
     return NULL;
+}
+
+static const char *cmd_bf(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    return bf_common("bf", bf_run_session);
+}
+
+static const char *cmd_bfdbg(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    return bf_common("bfdbg", bf_debug_session);
 }
 
 static const char *cmd_help(int argc, char **argv);
@@ -293,6 +311,7 @@ static const struct cmd {
     {"uiod", cmd_uiod, "uiod [hh]          set/get uio dir mask, 1=MCU drives"},
     {"uiow", cmd_uiow, "uiow <hh>          write uio output latch"},
     {"bf", cmd_bf, "bf                 run a BF session (BF design only)"},
+    {"bfdbg", cmd_bfdbg, "bfdbg              BF debugger: n=step c=run q=quit"},
     {"help", cmd_help, "help               this list"},
 };
 
