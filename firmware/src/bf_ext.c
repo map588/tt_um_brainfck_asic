@@ -5,7 +5,7 @@
  * (firmware/kit/firmware/include/ext.h) to add the `bf` and `bfdbg`
  * commands, launch the SPI RAM emulator on core 1, and report the
  * BF design address in hello/status. Two more overrides live in
- * bf_run.c (ext_clock_changed, ext_pins_safe), so the standalone
+ * bf_run.c (ext_clock_changed, ext_release_pins), so the standalone
  * bf_host target gets them without this file. The kit core is
  * untouched.
  */

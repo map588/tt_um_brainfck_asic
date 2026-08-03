@@ -83,7 +83,7 @@ void ext_clock_changed(uint32_t hz) {
  * must never drive MISO while another design owns the uio pins. The
  * CS pull-up is weak, cannot fight a driven pad, and keeps core 1
  * idle when the BF design is not routed (see spi_ram.c). */
-void ext_pins_safe(void) {
+void ext_release_pins(void) {
     spi_ram_set_enabled(false);
     gpio_pull_up(PIN_SPI_CS);
 }
