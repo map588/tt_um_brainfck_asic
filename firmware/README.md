@@ -10,40 +10,21 @@ This firmware is an extension of the
 [terminal-explorer kit](https://github.com/map588/tt_terminal_explorer),
 pulled in as the `kit/` submodule. The kit core provides the command
 protocol, the PIO clock, the pin control, and the carrier probe. The
-whole BF integration is one file, `src/bf_ext.c`, which overrides
+whole BF integration is one file, `src/bf_ext.c`, which defines
 the kit's extension hooks (`kit/firmware/include/ext.h`): the
 `bf`/`bfdbg` commands, the core-1 SPI RAM launch, the `bf=448` hello
 field, serial timings that follow the clock, and the pin parking
 that keeps core 1 off foreign designs.
 
-The build makes two UF2s. Flash the one you need:
+The build makes one UF2, `tt_host`: select any shuttle design, set
+or single-step the clock, peek and poke pins, and run BF as a
+command. The `../explorer` TUI drives it, and a bare terminal
+(`tio`, `screen`) works too.
 
-- **`bf_host`** (`src/bf_main.c`): standalone BF host with its own
-  main. It boots straight into the paste-a-program loop: open the
-  serial port, paste BF source, end with `!`. It selects design 448
-  and fixes the clock at 200 kHz. There are no commands to learn.
-  This is the debugging workhorse.
-- **`tt_host`**: the kit's command firmware plus the BF extension.
-  Select any shuttle design, set or single-step the clock, peek and
-  poke pins, and run BF as a command. The `../explorer` TUI drives
-  it.
-
-Both share the BF engine (`src/bf_run.c`: feeds the program one
-instruction at a time, mirrors the ASIC's PC, answers `interrupt_jump`
-with the precomputed bracket-match table, bridges `,`/`.` to serial)
-and run the SPI RAM tape slave on core 1 (`src/spi_ram.c`).
-
-## bf_host
-
-```
-== tt_um_brainfck_asic host ==
-ASIC clock 200000 Hz, design #448
-# paste program, end with '!'
-,+.,+.!AC
-```
-
-Anything that is not one of the eight BF ops is a comment. Anything
-after the `!` is consumed as `,` input by the running program.
+The BF engine (`src/bf_run.c`) feeds the program one instruction at
+a time, mirrors the ASIC's PC, answers `interrupt_jump` with the
+precomputed bracket-match table, and bridges `,`/`.` to serial. The
+SPI RAM tape slave runs on core 1 (`src/spi_ram.c`).
 
 ## Silicon bugs and their firmware workarounds
 
@@ -78,7 +59,7 @@ analysis plus step-mode pin traces. All four are worked around in
 
 Separate MCU-side limit: the host's bit-banged sampling of the
 ASIC→MCU link bit-slips at ASIC clocks ≥ 500 kHz. 200 kHz and below
-is fully reliable, which is why bf_host fixes the clock there.
+is fully reliable, which is why the TUI sets 200 kHz for BF runs.
 
 ## tt_host command protocol
 
@@ -102,8 +83,12 @@ communicates over this protocol, and a bare terminal (`tio`,
 | `bf` | interactive BF session (BF design + running clock required) |
 | `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the next breakpoint or the end, `b<index>` = toggle a breakpoint on a program index, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
 
-A `bf` session needs `design 448` and a running clock first, then
-works like bf_host: paste BF source, end with `!`.
+A `bf` session needs `design 448` and a running clock first. Paste
+BF source and end with `!`. Anything that is not one of the eight
+BF ops is a comment. Anything after the `!` is consumed as `,`
+input by the running program. Two control bytes work during a
+session: Ctrl-D is end of input, so the next `,` reads 0. Ctrl-C
+stops the session with `err stopped`.
 
 ## Build
 
@@ -117,16 +102,15 @@ cmake -S . -B build -G Ninja -DPICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/14_
 cmake --build build
 ```
 
-Flash `build/bf_host.uf2` or `build/tt_host.uf2` over BOOTSEL (or
-`picotool load -f -x`). Both wait for the USB serial port to open.
+Flash `build/tt_host.uf2` over BOOTSEL (or `picotool load -f -x`).
+The firmware waits for the USB serial port to open.
 
 Configuration knobs:
 
 | Define | Where | Default | Notes |
 |---|---|---|---|
-| `BF_CLK_HZ` | `src/bf_main.c` | 200 kHz | bf_host clock, the silicon serial-link ceiling. |
 | `BF_DESIGN_ADDR` | `include/bf_pins.h` | 448 | tt_um_brainfck_asic mux slot on ttsky25b. The FPGA sim ignores the mux. |
-| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
+| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz / 2 MHz | `bf` refuses to run outside this window (bit-banged handshake limits). |
 | `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap. The ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO

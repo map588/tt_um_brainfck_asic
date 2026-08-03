@@ -140,6 +140,7 @@ class TTExplorerApp(App):
     #bf-step { background: $primary-darken-1; }
     #bf-cont { background: $success-darken-2; }
     #bf-abort { background: $warning-darken-2; }
+    #bf-eof { background: $panel-lighten-1; margin-left: 2; }
     #bf-dbg-state { margin-left: 2; color: $success; text-style: bold; }
     #bf-state.bf-running { color: $success; }
     #bf-state.bf-error { color: $warning; text-style: bold; }
@@ -286,6 +287,8 @@ class TTExplorerApp(App):
             await self._bf_finish()
         link = self.link
         if link is None or link.busy or link.raw:
+            if self._bf_active:
+                self.query_one(BfPanel).flush_output()
             return
         try:
             reply = await link.request("uo", timeout=1.0)
@@ -348,7 +351,7 @@ class TTExplorerApp(App):
         self._bf_end = None
         self._bf_active = True
         self._bf_debug = debug
-        self.link.set_raw_sink(self._on_bf_chunk)
+        await self.link.begin_raw(self._on_bf_chunk)
         self.link.write_raw("bfdbg\n" if debug else "bf\n")
         self.link.write_raw(program)
         if debug:
@@ -381,6 +384,7 @@ class TTExplorerApp(App):
             self.link.set_raw_sink(None)
         self._set_bench_frozen(False)
         panel = self.query_one(BfPanel)
+        panel.flush_output()
         panel.set_running(False)
         panel.show_result(ok, "✓ done — Bench live again" if ok
                           else f"failed: {token} — see output above")
@@ -519,10 +523,15 @@ class TTExplorerApp(App):
             await self._bf_start()
         elif bid == "bf-debug":
             await self._bf_start(debug=True)
-        elif bid in ("bf-step", "bf-cont", "bf-abort") and self._bf_active:
+        elif bid in ("bf-step", "bf-cont") and self._bf_active:
             if self.link:
-                self.link.write_raw(
-                    {"bf-step": "n", "bf-cont": "c", "bf-abort": "q"}[bid])
+                self.link.write_raw({"bf-step": "n", "bf-cont": "c"}[bid])
+        elif bid == "bf-abort" and self._bf_active:
+            if self.link:
+                self.link.write_raw("\x03")  # Ctrl-C: stop the session
+        elif bid == "bf-eof" and self._bf_active:
+            if self.link:
+                self.link.write_raw("\x04")  # Ctrl-D: ',' reads 0
         elif bid == "bf-break":
             panel = self.query_one(BfPanel)
             n = panel.op_index_at_cursor()

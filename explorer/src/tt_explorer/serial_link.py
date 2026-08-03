@@ -80,6 +80,12 @@ class SerialLink:
     def set_raw_sink(self, sink: Callable[[str], None] | None) -> None:
         self._raw_sink = sink
 
+    async def begin_raw(self, sink: Callable[[str], None]) -> None:
+        """Enter raw mode after any in-flight request completes, so
+        its reply cannot leak into the raw sink."""
+        async with self._lock:
+            self._raw_sink = sink
+
     def write_raw(self, text: str) -> None:
         self._ser.write(text.encode())
 
@@ -101,7 +107,12 @@ class SerialLink:
         buf = b""
         while not self._closed:
             try:
-                data = self._ser.read(256)
+                # read(1) returns on the first byte; a bigger size
+                # would wait the full timeout for bytes that never
+                # come and delay every reply by that much.
+                data = self._ser.read(1)
+                if data and self._ser.in_waiting:
+                    data += self._ser.read(self._ser.in_waiting)
             except (OSError, serial.SerialException):
                 break
             if not data:

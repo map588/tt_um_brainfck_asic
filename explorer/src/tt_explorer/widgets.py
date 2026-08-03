@@ -421,7 +421,8 @@ class BfPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("program: everything except + - < > [ ] , . is a "
-                    "comment. Run appends the '!' terminator",
+                    "comment. Run appends '!'. End input makes the "
+                    "next ',' read 0. Stop ends the run.",
                     classes="hint")
         yield TextArea(id="bf-program")
         with Horizontal(id="bf-controls"):
@@ -429,11 +430,12 @@ class BfPanel(Vertical):
             yield Button("⏯  Debug", id="bf-debug")
             yield Input(placeholder="input for ',', sent raw on enter",
                         id="bf-stdin", disabled=True)
+            yield Button("⏹ End input", id="bf-eof", disabled=True)
+            yield Button("✖ Stop", id="bf-abort", disabled=True)
             yield Static("", id="bf-state")
         with Horizontal(id="bf-dbg-controls"):
             yield Button("⏵ Step", id="bf-step")
             yield Button("▶ Continue", id="bf-cont")
-            yield Button("✖ Stop", id="bf-abort")
             yield Static("", id="bf-dbg-state")
         with Horizontal(id="bf-bp-row"):
             yield Button("⏺ Break @ cursor", id="bf-break")
@@ -467,6 +469,8 @@ class BfPanel(Vertical):
         self.query_one("#bf-run", Button).disabled = running
         self.query_one("#bf-debug", Button).disabled = running
         self.query_one("#bf-stdin", Input).disabled = not running
+        self.query_one("#bf-eof", Button).disabled = not running
+        self.query_one("#bf-abort", Button).disabled = not running
         self.query_one("#bf-dbg-controls").display = running and debug
         state = self.query_one("#bf-state", Static)
         if running:
@@ -489,10 +493,22 @@ class BfPanel(Vertical):
         state.set_class(not ok, "bf-error")
         state.update(detail)
 
+    _outbuf = ""  # session bytes arrive in small chunks; line-buffer them
+
     def write_output(self, text: str) -> None:
-        self.query_one("#bf-output", RichLog).write(text)
+        self._outbuf += text.replace("\r", "")
+        while "\n" in self._outbuf:
+            line, self._outbuf = self._outbuf.split("\n", 1)
+            self.query_one("#bf-output", RichLog).write(line)
+
+    def flush_output(self) -> None:
+        """Show a partial line (a prompt, or output with no newline)."""
+        if self._outbuf:
+            self.query_one("#bf-output", RichLog).write(self._outbuf)
+            self._outbuf = ""
 
     def clear_output(self) -> None:
+        self._outbuf = ""
         self.query_one("#bf-output", RichLog).clear()
 
 

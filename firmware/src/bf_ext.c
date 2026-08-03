@@ -1,13 +1,12 @@
 /*
  * BF extension of the terminal-explorer kit firmware.
  *
- * This file overrides the kit's extension hooks
- * (firmware/kit/firmware/include/ext.h) to add the `bf` and `bfdbg`
- * commands, launch the SPI RAM emulator on core 1, and report the
- * BF design address in hello/status. Two more overrides live in
- * bf_run.c (ext_clock_changed, ext_release_pins), so the standalone
- * bf_host target gets them without this file. The kit core is
- * untouched.
+ * The whole BF integration is this file: it defines the kit's
+ * extension hooks (kit/firmware/include/ext.h) to add the `bf` and
+ * `bfdbg` commands, launch the SPI RAM emulator on core 1, follow
+ * clock and design changes, and report the BF design address in
+ * hello/status. bf_run.c is the engine and spi_ram.c the tape. The
+ * kit core is untouched.
  */
 #include <stdio.h>
 #include <string.h>
@@ -101,4 +100,18 @@ void ext_status(char *out, size_t cap) {
 void ext_design_changed(unsigned addr) {
     bf_design = (int)addr;
     bf_armed = false; /* the safe profile disarmed the BF pins */
+}
+
+void ext_clock_changed(uint32_t hz) {
+    (void)hz;
+    bf_timing_update();
+}
+
+/* Park extension hardware whenever the safe profile applies: core 1
+ * must never drive MISO while another design owns the uio pins. The
+ * CS pull-up is weak, cannot fight a driven pad, and keeps core 1
+ * idle when the BF design is not routed (see spi_ram.c). */
+void ext_release_pins(void) {
+    spi_ram_set_enabled(false);
+    gpio_pull_up(PIN_SPI_CS);
 }
