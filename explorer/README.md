@@ -25,21 +25,21 @@ console. "BF" is the program tab for the Brainf*ck ASIC: type or
 paste a program, press Run, feed ',' input through the field beside
 it, or press Debug to step the program one instruction at a time
 with live pc / cell / bracket-stack state between steps. "Break @
-cursor" toggles a breakpoint on the op under the editor cursor;
-Continue then runs to the next breakpoint. While a
-program or debug session runs the firmware is in a raw byte stream, so
-the Bench freezes; between runs the Bench is fully live — including
-the inspect_sel pins (ui6/7), which stay unlocked for state
-inspection. Pins the BF host owns (ui0-5 and the uio bus) are locked
-whenever the BF design is loaded.
+cursor" toggles a breakpoint on the op under the editor cursor.
+Continue then runs to the next breakpoint. While a program or
+debug session runs, the firmware is in a raw byte stream and the
+Bench freezes. Between runs the Bench is fully live, including the
+inspect_sel pins (ui6/7), which stay unlocked for state
+inspection. Pins the BF host owns (ui0-5 and the uio bus) are
+locked whenever the BF design is loaded.
 
 ## Keys
 
-- `s` — stop / resume the project clock
-- `space` — one clock pulse (when stopped)
-- `b` — go to the BF tab
-- `i` — refresh the shuttle index (cached in `~/.cache/tt-explorer/`)
-- `q` — quit
+- `s` : stop / resume the project clock
+- `space` : one clock pulse (when stopped)
+- `b` : go to the BF tab
+- `i` : refresh the shuttle index (cached in `~/.cache/tt-explorer/`)
+- `q` : quit
 
 ## Test
 

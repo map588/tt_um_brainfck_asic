@@ -1,8 +1,8 @@
 # RP2350 host firmware
 
 Runs on the Tiny Tapeout demo board v3 (RP2350B) and drives
-`tt_um_brainfck_asic` — either real silicon or the ICE40UP5K ASIC-sim
-carrier built by the `fpga` workflow.
+`tt_um_brainfck_asic`: either real silicon or the ICE40UP5K
+ASIC-sim carrier built by the `fpga` workflow.
 
 ## Built on the terminal-explorer kit
 
@@ -20,7 +20,7 @@ The build makes two UF2s. Flash the one you need:
 
 - **`bf_host`** (`src/bf_main.c`): standalone BF host with its own
   main. It boots straight into the paste-a-program loop: open the
-  serial port, paste BF source, end with `!`. It selects design`include/bf_pins.h` | 448
+  serial port, paste BF source, end with `!`. It selects design 448
   and fixes the clock at 200 kHz. There are no commands to learn.
   This is the debugging workhorse.
 - **`tt_host`**: the kit's command firmware plus the BF extension.
@@ -42,7 +42,7 @@ ASIC clock 200000 Hz, design #448
 ,+.,+.!AC
 ```
 
-Anything that is not one of the eight BF ops is a comment; anything
+Anything that is not one of the eight BF ops is a comment. Anything
 after the `!` is consumed as `,` input by the running program.
 
 ## Silicon bugs and their firmware workarounds
@@ -78,30 +78,31 @@ analysis plus step-mode pin traces. All four are worked around in
 
 Separate MCU-side limit: the host's bit-banged sampling of the
 ASIC→MCU link bit-slips at ASIC clocks ≥ 500 kHz. 200 kHz and below
-is fully reliable — hence bf_host's fixed clock.
+is fully reliable, which is why bf_host fixes the clock there.
 
 ## tt_host command protocol
 
-One command per line; each command gets exactly one reply line,
+One command per line. Each command gets exactly one reply line,
 `ok [payload]` or `err <token>`. Informational lines start with `# `.
-Type `help` on the port for the list. The `../explorer` TUI speaks
-this protocol; a bare terminal (`tio`, `screen`) works too.
+Type `help` on the port for the list. The `../explorer` TUI
+communicates over this protocol, and a bare terminal (`tio`,
+`screen`) works too.
 
 | Command | Effect |
 |---|---|
 | `hello` | `ok tt-explorer 2 shuttle=ttsky25b bf=448`: the kit protocol plus the BF extension field |
 | `status` | design, clock mode/freq, pin state (`uidrv=0` when ui is released) |
-| `freq <hz>` | free-running clock, 1 Hz – clk_sys/2 (75 MHz), made by PIO with one-sys-cycle resolution. The true output frequency never exceeds the request; the reply reports it. |
-| `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart PWM |
+| `freq <hz>` | free-running clock, 1 Hz to clk_sys/2 (75 MHz), made by PIO with one-sys-cycle resolution. The true output frequency never exceeds the request, and the reply reports it. |
+| `stop` / `step [n]` / `resume` | park the clock low, pulse it n times, restart the clock |
 | `design <n>` | safe pin profile, mux-select design n, reset pulse |
-| `reset [1\|0]` | pulse (no arg), assert, or release the project reset |
+| `reset [1\|0]` | pulse (no arg), assert, or release the project reset. A pulse in step mode makes 10 clock edges while reset is low. |
 | `ui <hh>` / `ui off` / `ui` | drive ui_in, release it for the DIP switches / PMOD, or read the pad levels |
 | `uo` / `uio` | read uo_out / uio pad levels (hex byte) |
 | `uiod [hh]` / `uiow <hh>` | uio direction mask (1 = MCU drives) / output latch |
 | `bf` | interactive BF session (BF design + running clock required) |
 | `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the next breakpoint or the end, `b<index>` = toggle a breakpoint on a program index, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
 
-A `bf` session needs `design`include/bf_pins.h` | 448` and a running clock first, then
+A `bf` session needs `design 448` and a running clock first, then
 works like bf_host: paste BF source, end with `!`.
 
 ## Build
@@ -123,10 +124,10 @@ Configuration knobs:
 
 | Define | Where | Default | Notes |
 |---|---|---|---|
-| `BF_CLK_HZ` | `src/bf_main.c` | 200 kHz | bf_host clock; the silicon serial-link ceiling. |
-| `BF_DESIGN_ADDR` | `include/bf_pins.h` | 448| 448 | tt_um_brainfck_asic mux slot on ttsky25b; the FPGA sim ignores the mux. |
-| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz| 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
-| `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap — the ASIC PC is 10 bits. |
+| `BF_CLK_HZ` | `src/bf_main.c` | 200 kHz | bf_host clock, the silicon serial-link ceiling. |
+| `BF_DESIGN_ADDR` | `include/bf_pins.h` | 448 | tt_um_brainfck_asic mux slot on ttsky25b. The FPGA sim ignores the mux. |
+| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz / 2 MHz | tt_host `bf` refuses to run outside this window (bit-banged handshake limits). |
+| `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap. The ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO
 map, see the kit tt_pins.h and `include/bf_pins.h`).
@@ -136,8 +137,8 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
 1. **`instr_valid` width is critical.** The core executes on *every*
    rising clock edge where `instr_valid` is high, so a pulse wider than
    one clock period double-executes. The firmware owns the clock and
-   raises/drops the pulse between two consecutive falling edges — exactly
-   one rising edge samples it high.
+   raises/drops the pulse between two consecutive falling edges, so
+   exactly one rising edge samples it high.
 
 2. **SPI cache refills are invisible.** `irq_cache_pulse` exists in
    `bf_asic.v` but is never set, so a `<`/`>` that crosses the cache
@@ -152,7 +153,7 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
    wire. The emulator detects SCK-high at the CS falling edge and
    implies the missing MSB (both commands have bit7 = 0). **A real
    23LC1024 cannot do this and will fail half of all transfers.**
-   Suggested RTL fix — hold SCK low while idle so every transaction
+   Suggested RTL fix: hold SCK low while idle so every transaction
    starts in the driven phase, e.g. in `spi_master.v`:
 
    ```verilog
@@ -168,5 +169,6 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
 
 5. **`[` skip semantics.** On a taken forward skip the ASIC pushes its PC
    *before* waiting, and expects to be told the address **of** the
-   matching `]` (not one past it) — executing that `]` with data==0 pops
-   the placeholder. The firmware's match table does exactly this.
+   matching `]` (not one past it): executing that `]` with data==0
+   pops the placeholder. The firmware's match table does exactly
+   this.
