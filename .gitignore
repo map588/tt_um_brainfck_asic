@@ -13,3 +13,4 @@ test/gate_level_netlist.v
 
 # pico-sdk build output
 firmware/build/
+firmware/.cache/
