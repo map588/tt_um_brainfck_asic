@@ -61,18 +61,25 @@ static jmp_buf bf_err; /* die() jumps here; set in bf_run_session() */
 static uint32_t rx_settle_us;
 static uint32_t serial_half_us;
 
-/* One pushed-back byte from the stop poll: it is pending ',' input
- * and must not be lost. */
-static int pushback = -1;
+/* Pending ',' input, queued by the stop poll. A queue (not a single
+ * pushback byte) so that queued input can never hide a CH_STOP: a
+ * program with no ',' never consumes the queue, and one stray byte
+ * (the Enter after '!') would otherwise disarm the killswitch. */
+#define INQ_CAP 1024u
+static uint8_t inq[INQ_CAP];
+static uint16_t inq_r, inq_w, inq_count;
+
+static void inq_reset(void) { inq_r = inq_w = inq_count = 0; }
 
 /* Read one byte from the host, or -1 when the host disconnects.
  * A plain getchar() blocks forever after the port closes, and the
  * stuck session then eats the next connection's commands as
  * session input. */
 static int host_getchar(void) {
-    if (pushback >= 0) {
-        int c = pushback;
-        pushback = -1;
+    if (inq_count) {
+        int c = inq[inq_r];
+        inq_r = (uint16_t)((inq_r + 1) % INQ_CAP);
+        inq_count--;
         return c;
     }
     for (;;) {
@@ -84,17 +91,20 @@ static int host_getchar(void) {
     }
 }
 
-/* Non-blocking check for CH_STOP between instructions. Any other
- * byte is pending ',' input and goes into the pushback. */
+/* Non-blocking check for CH_STOP between instructions. Every other
+ * waiting byte is pending ',' input and moves into the queue. */
 static bool host_wants_stop(void) {
-    if (pushback >= 0)
-        return false;
-    int c = getchar_timeout_us(0);
-    if (c == CH_STOP)
-        return true;
-    if (c >= 0)
-        pushback = c;
-    return false;
+    while (inq_count < INQ_CAP) {
+        int c = getchar_timeout_us(0);
+        if (c < 0)
+            return false;
+        if (c == CH_STOP)
+            return true;
+        inq[inq_w] = (uint8_t)c;
+        inq_w = (uint16_t)((inq_w + 1) % INQ_CAP);
+        inq_count++;
+    }
+    return false; /* queue full: bytes stay in the CDC buffer */
 }
 
 void bf_timing_update(void) {
@@ -670,7 +680,7 @@ static void run(bf_state_t *s) {
 }
 
 const char *bf_run_session(void) {
-    pushback = -1;
+    inq_reset();
     if (!read_program())
         return "bad-program";
     if (!build_jump_table())
@@ -753,7 +763,7 @@ static void bp_command(void) {
  * instruction, 'c' runs to the next breakpoint or the end, 'q' stops
  * the session. */
 const char *bf_debug_session(void) {
-    pushback = -1;
+    inq_reset();
     if (!read_program())
         return "bad-program";
     if (!build_jump_table())
