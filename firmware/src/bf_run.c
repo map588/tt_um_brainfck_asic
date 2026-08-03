@@ -1,10 +1,11 @@
 /*
- * BF execution engine for tt_um_brainfck_asic.
+ * BF execution engine for tt_um_brainfck_asic. Runs on CORE 1.
  *
- * Drives the ASIC clock handshake, feeds instructions, mirrors the
- * program counter, resolves bracket jumps against a precomputed match
- * table, and services ','/'.' over USB CDC.
- * Core 1 (spi_ram.c) emulates the SPI RAM tape.
+ * Core 1 takes no interrupts, so every bit-banged handshake below
+ * runs with deterministic timing and no masking. Core 0 owns USB and
+ * all text output; this file talks to it only through the mailbox in
+ * bf_link.h (input ring in, SIO FIFO events out). bf_session.c is
+ * the core-0 side.
  *
  * Handshake model
  * ---------------
@@ -21,105 +22,89 @@
  *   ','        : interrupt_io,   ASIC waits on RX -> send {2'b00, byte}
  *
  * instr_valid is sampled every ASIC clock edge, so a sloppy pulse executes
- * an instruction twice.  The clock module generates the ASIC clock (PWM)
- * and we pulse instr_valid from falling edge to falling edge — exactly one
- * rising edge sees it high.
+ * an instruction twice.  The clock module generates the ASIC clock and we
+ * pulse instr_valid from falling edge to falling edge — exactly one rising
+ * edge sees it high.
  */
 #include <setjmp.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
-#include "pico/stdio_usb.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 
+#include "bf_link.h"
 #include "bf_pins.h"
 #include "bf_run.h"
 #include "board.h"
 #include "clock.h"
-#include "spi_ram.h"
 
-#define MAX_OPS 1024u /* ASIC PC is 10 bits */
 #define PC_TIMEOUT_US 200000u
 #define SERIAL_TIMEOUT_US 200000u
 
-#define CH_STOP 0x03 /* Ctrl-C: stop the session */
-#define CH_EOF 0x04  /* Ctrl-D: end of input, ',' reads 0 */
+/* Clock edges to wait after an ASIC->MCU transfer (real frame plus
+ * phantom). After the phantom's last bit, serial_tx still passes
+ * DONE (done=1 for one cycle) and IDLE. A TX op fed into that
+ * window samples the stale tx_done in WAIT_IO/WAIT_JUMP and
+ * completes without ever transmitting. Counted in edges, not time:
+ * a time delay aliases against the clock phase. Derived window is
+ * 3 cycles; 6 gives margin. */
+#define TX_DISARM_EDGES 6u
 
-enum { OP_SUB, OP_ADD, OP_LEFT, OP_RIGHT, OP_OPEN, OP_CLOSE, OP_IN, OP_OUT };
 static const char OP_CHAR[8] = {'-', '+', '<', '>', '[', ']', ',', '.'};
 
-static uint8_t ops[MAX_OPS];
-static uint16_t match[MAX_OPS];
-static uint16_t n_ops;
+volatile bf_shared_t bf_shared;
+uint8_t bf_ops[BF_MAX_OPS];
+uint16_t bf_match[BF_MAX_OPS];
+uint16_t bf_n_ops;
 
-static jmp_buf bf_err; /* die() jumps here; set in bf_run_session() */
+static jmp_buf bf_err; /* die()/stop jump here; set per session */
+enum { JMP_DIE = 1, JMP_STOP = 2, JMP_HOST_LOST = 3 };
 
-/* Timings that follow the ASIC clock. The kit calls the hook on
- * every clock change, so the hot serial loops read plain variables. */
-static uint32_t rx_settle_us;
-static uint32_t serial_half_us;
-
-/* Pending ',' input, queued by the stop poll. A queue (not a single
- * pushback byte) so that queued input can never hide a CH_STOP: a
- * program with no ',' never consumes the queue, and one stray byte
- * (the Enter after '!') would otherwise disarm the killswitch. */
-#define INQ_CAP 1024u
-static uint8_t inq[INQ_CAP];
-static uint16_t inq_r, inq_w, inq_count;
-
-static void inq_reset(void) { inq_r = inq_w = inq_count = 0; }
-
-/* Read one byte from the host, or -1 when the host disconnects.
- * A plain getchar() blocks forever after the port closes, and the
- * stuck session then eats the next connection's commands as
- * session input. */
-static int host_getchar(void) {
-    if (inq_count) {
-        int c = inq[inq_r];
-        inq_r = (uint16_t)((inq_r + 1) % INQ_CAP);
-        inq_count--;
-        return c;
-    }
-    for (;;) {
-        int c = getchar_timeout_us(100000);
-        if (c != PICO_ERROR_TIMEOUT)
-            return c;
-        if (!stdio_usb_connected())
-            return -1;
-    }
-}
-
-/* Non-blocking check for CH_STOP between instructions. Every other
- * waiting byte is pending ',' input and moves into the queue. */
-static bool host_wants_stop(void) {
-    while (inq_count < INQ_CAP) {
-        int c = getchar_timeout_us(0);
-        if (c < 0)
-            return false;
-        if (c == CH_STOP)
-            return true;
-        inq[inq_w] = (uint8_t)c;
-        inq_w = (uint16_t)((inq_w + 1) % INQ_CAP);
-        inq_count++;
-    }
-    return false; /* queue full: bytes stay in the CDC buffer */
-}
+/* Timings that follow the ASIC clock. Core 0 writes them from the
+ * ext_clock_changed hook, always between sessions. */
+static volatile uint32_t rx_settle_us;
+static volatile uint32_t serial_half_us;
 
 void bf_timing_update(void) {
     rx_settle_us = asic_clks_us(32u);
     serial_half_us = asic_clks_us(6u);
 }
 
-/* BF pin roles on top of the safe profile; enables the core-1 SPI
- * RAM. The 8 ui pins are already MCU outputs (instr, instr_valid,
- * rx clk/bit, inspect_sel) and only MISO changes on the uio side. */
+/* BF pin roles on top of the safe profile. The 8 ui pins are already
+ * MCU outputs (instr, instr_valid, rx clk/bit, inspect_sel). MISO is
+ * driven low so the ASIC's SPI input does not float. */
 void pins_bf(void) {
     pins_safe();
     gpio_put(PIN_SPI_MISO, 0);
     gpio_set_dir(PIN_SPI_MISO, GPIO_OUT);
-    spi_ram_set_enabled(true);
+}
+
+/* ---- mailbox ---- */
+
+/* Publish payload writes, then the event word. */
+static void ev_push(uint8_t tag, uint32_t arg) {
+    __dmb();
+    multicore_fifo_push_blocking(BF_EV_WORD(tag, arg));
+}
+
+static void __attribute__((noreturn)) stop_run(void);
+static void __attribute__((noreturn)) lost_host(void);
+
+/* One input byte for ',' or a debugger key. Blocks until a byte
+ * arrives, the host asks for a stop, or the host disconnects. */
+static int in_wait(void) {
+    for (;;) {
+        if (bf_shared.stop_req)
+            return -1;
+        if (bf_shared.host_lost)
+            return -2;
+        int c = bf_in_get();
+        if (c >= 0)
+            return c;
+        tight_loop_contents();
+    }
 }
 
 /* ---- low-level pin access ---- */
@@ -139,23 +124,11 @@ static void set_inspect_sel(uint sel) {
     gpio_put(PIN_SEL1, (sel >> 1) & 1);
 }
 
-/* Fresh machine for each program: ASIC registers and the emulated tape
- * both back to zero.  The tape is cleared mid-reset, while CS is
- * guaranteed deasserted and core 1 is parked. */
-static void asic_reset(void) {
-    gpio_put(TT_PIN_PROJ_NRST, 0);
-    busy_wait_us(asic_clks_us(64u));
-    spi_ram_clear();
-    gpio_put(TT_PIN_PROJ_NRST, 1);
-    busy_wait_us(asic_clks_us(64u));
-}
-
 /* ---- instruction feed ---- */
 
 /* Assert instr_valid across exactly one rising edge of the ASIC clock:
- * raise it just after a falling edge, drop it just after the next one.
- * The caller must hold interrupts off. */
-static void __not_in_flash_func(feed_instr_raw)(uint8_t op) {
+ * raise it just after a falling edge, drop it just after the next one. */
+static void __not_in_flash_func(feed_instr)(uint8_t op) {
     gpio_put(PIN_INSTR0, op & 1);
     gpio_put(PIN_INSTR1, (op >> 1) & 1);
     gpio_put(PIN_INSTR2, (op >> 2) & 1);
@@ -172,25 +145,29 @@ static void __not_in_flash_func(feed_instr_raw)(uint8_t op) {
     gpio_put(PIN_INSTR_VALID, 0);
 }
 
-/* feed_instr_raw for ops that transmit nothing back. */
-static void feed_instr(uint8_t op) {
-    uint32_t save = save_and_disable_interrupts();
-    feed_instr_raw(op);
-    restore_interrupts(save);
-}
-
 /* ---- completion / interrupt polling ---- */
 
 typedef enum { EV_PC_ADVANCED, EV_IRQ, EV_TIMEOUT } event_t;
+
+/* The pads switch on the ASIC's rising clock edge and our poll is
+ * asynchronous, so a single read can catch a mid-transition value
+ * (some pads switched, others not). Accept a match only when a
+ * second read ~200 ns later agrees: pad-to-pad skew resolves well
+ * inside that, so a transient cannot survive the confirmation. */
+static bool __not_in_flash_func(inspect_is)(uint8_t expect) {
+    if (inspect_from(gpio_snapshot()) != expect)
+        return false;
+    busy_wait_at_least_cycles(32);
+    return inspect_from(gpio_snapshot()) == expect;
+}
 
 static event_t await_pc_or_irq(uint8_t expect_pc, uint irq_pin,
                                uint32_t timeout_us) {
     absolute_time_t dl = make_timeout_time_us(timeout_us);
     for (;;) {
-        uint64_t snap = gpio_snapshot();
-        if ((snap >> irq_pin) & 1)
+        if (gpio_get(irq_pin))
             return EV_IRQ;
-        if (inspect_from(snap) == expect_pc)
+        if (inspect_is(expect_pc))
             return EV_PC_ADVANCED;
         if (time_reached(dl))
             return EV_TIMEOUT;
@@ -199,7 +176,7 @@ static event_t await_pc_or_irq(uint8_t expect_pc, uint irq_pin,
 
 static bool wait_pc_low(uint8_t expect, uint32_t timeout_us) {
     absolute_time_t dl = make_timeout_time_us(timeout_us);
-    while (inspect_from(gpio_snapshot()) != expect) {
+    while (!inspect_is(expect)) {
         if (time_reached(dl))
             return false;
     }
@@ -220,7 +197,7 @@ static bool wait_gpio_low(uint pin, uint32_t timeout_us) {
 /* MCU->ASIC: serial_rx samples RX_BIT on the (synchronized) rising edge of
  * RX_CLK; each phase is held for several ASIC clocks to clear the two-flop
  * synchronizer.  MSB first. */
-static void send10(uint16_t v) {
+static void __not_in_flash_func(send10)(uint16_t v) {
     for (int i = 9; i >= 0; i--) {
         gpio_put(PIN_RX_BIT, (v >> i) & 1);
         busy_wait_us(serial_half_us);
@@ -231,12 +208,11 @@ static void send10(uint16_t v) {
     }
 }
 
-/* ASIC->MCU: TX_CLK idles high, drops to announce a transfer, then each of
- * the 10 bits (MSB first) is stable from one rising edge to the next.
- * Sample one frame. TX_CLK must already be low (start seen) and the
- * caller must hold interrupts off: the bit period is only 2 ASIC
- * clocks. */
-static bool sample10(uint16_t *out, absolute_time_t dl) {
+/* ASIC->MCU: TX_CLK idles high, drops to announce a transfer, then each
+ * of the 10 bits (MSB first) is stable from one rising edge to the next.
+ * Sample one frame; TX_CLK must already be low (start seen). In RAM so
+ * core-0 flash traffic cannot stall a 2-ASIC-clock bit window. */
+static bool __not_in_flash_func(sample10)(uint16_t *out, absolute_time_t dl) {
     uint16_t v = 0;
     for (int i = 0; i < 10; i++) {
         while (!gpio_get(PIN_TX_CLK)) {
@@ -255,12 +231,10 @@ static bool sample10(uint16_t *out, absolute_time_t dl) {
 
 /* Receive one frame and swallow its phantom repeat (silicon bug 2:
  * serial_tx re-arms on a stale start strobe, so every frame repeats
- * once). The caller must hold interrupts off, from BEFORE the fed
- * instruction can start the transfer: a USB interrupt anywhere from
- * the feed to the end of the phantom outlasts the frames, and the
- * data is then gone. Returns the first frame's value, or -1 on
- * timeout. */
-static int recv10_raw(uint32_t timeout_us) {
+ * once). Core 1 takes no interrupts, so nothing can outlast the
+ * frames between the samples. Returns the first frame's value, or -1
+ * on timeout. */
+static int __not_in_flash_func(recv10)(uint32_t timeout_us) {
     absolute_time_t dl = make_timeout_time_us(timeout_us);
     while (gpio_get(PIN_TX_CLK)) { /* wait for start (clock drop) */
         if (time_reached(dl))
@@ -269,156 +243,109 @@ static int recv10_raw(uint32_t timeout_us) {
     uint16_t v = 0, junk = 0;
     if (!sample10(&v, dl))
         return -1;
-    /* The phantom start comes within a few ASIC clocks. Bound the
-     * wait so a genuinely missing phantom cannot spin for the
-     * caller's full timeout. */
+    /* The phantom start comes within a few ASIC clocks; bound the
+     * wait so a genuinely missing phantom fails fast. */
     absolute_time_t pdl = make_timeout_time_us(asic_clks_us(64u));
     while (!time_reached(pdl)) {
-        if (!gpio_get(PIN_TX_CLK))
-            return sample10(&junk, dl) ? v : -1;
+        if (!gpio_get(PIN_TX_CLK)) {
+            if (!sample10(&junk, dl))
+                return -1;
+            for (uint n = TX_DISARM_EDGES; n--;) {
+                while (!gpio_get(TT_PIN_PROJ_CLK))
+                    tight_loop_contents();
+                while (gpio_get(TT_PIN_PROJ_CLK))
+                    tight_loop_contents();
+            }
+            return v;
+        }
     }
     return -1;
 }
 
-/* ---- program load ---- */
-
-static int op_of(int c) {
-    switch (c) {
-    case '-': return OP_SUB;
-    case '+': return OP_ADD;
-    case '<': return OP_LEFT;
-    case '>': return OP_RIGHT;
-    case '[': return OP_OPEN;
-    case ']': return OP_CLOSE;
-    case ',': return OP_IN;
-    case '.': return OP_OUT;
-    default: return -1;
-    }
+/* Read one inspect value with the mux settled. */
+static uint8_t inspect_read(uint sel) {
+    set_inspect_sel(sel);
+    busy_wait_us(asic_clks_us(4u));
+    return inspect_from(gpio_snapshot());
 }
 
-/* Read BF source from USB CDC until '!' (or Ctrl-D).  Everything that
- * isn't one of the eight ops is a comment.  Anything after the '!' stays
- * in the stream and becomes ',' input for the program. */
-static bool read_program(void) {
-    printf("# paste program, end with '!'\n");
-    n_ops = 0;
-    bool overflow = false;
-    for (;;) {
-        int c = host_getchar();
-        if (c < 0)
-            return false; /* host gone, abort the session */
-        if (c == CH_STOP)
-            return false; /* host stop during the paste */
-        if (c == '!' || c == CH_EOF)
-            break;
-        int op = op_of(c);
-        if (op < 0)
-            continue;
-        if (n_ops == MAX_OPS) {
-            overflow = true; /* keep draining until the terminator */
-            continue;
-        }
-        ops[n_ops++] = (uint8_t)op;
-        putchar(c); /* echo accepted ops so a paste is visible */
+/* Fresh machine for each program. VERIFIED: pulse reset, then read
+ * PC and DATA back, and pulse again until both are zero. An
+ * unverified pulse intermittently leaves stale state behind. */
+static bool asic_reset(void) {
+    for (int tries = 0; tries < 8; tries++) {
+        gpio_put(TT_PIN_PROJ_NRST, 0);
+        busy_wait_us(asic_clks_us(64u));
+        gpio_put(TT_PIN_PROJ_NRST, 1);
+        busy_wait_us(asic_clks_us(64u));
+        uint8_t pc = inspect_read(INSPECT_PC);
+        uint8_t data = inspect_read(INSPECT_DATA);
+        set_inspect_sel(INSPECT_PC);
+        busy_wait_us(asic_clks_us(4u));
+        if (pc == 0 && data == 0)
+            return true;
     }
-    putchar('\n');
-    if (overflow) {
-        printf("# program exceeds %u ops (ASIC PC is 10 bits) — discarded\n",
-               MAX_OPS);
-        return false;
-    }
-    if (n_ops == 0)
-        return false;
-    printf("# %u ops\n", n_ops);
-    return true;
-}
-
-static bool build_jump_table(void) {
-    uint16_t stack[MAX_OPS];
-    uint sp = 0, max_depth = 0;
-    for (uint16_t i = 0; i < n_ops; i++) {
-        if (ops[i] == OP_OPEN) {
-            stack[sp++] = i;
-            if (sp > max_depth)
-                max_depth = sp;
-        } else if (ops[i] == OP_CLOSE) {
-            if (sp == 0) {
-                printf("# unmatched ']' at op %u\n", i);
-                return false;
-            }
-            uint16_t j = stack[--sp];
-            match[j] = i;
-            match[i] = j;
-        }
-    }
-    if (sp != 0) {
-        printf("# unmatched '[' at op %u\n", stack[sp - 1]);
-        return false;
-    }
-    if (max_depth > 8)
-        printf("# nesting depth %u exceeds the ASIC's 8-deep bracket "
-               "stack — deeper loops will misbehave\n",
-               max_depth);
-    return true;
+    return false;
 }
 
 /* ---- error handling ---- */
 
-/* Dump diagnostics, put the feed pins back to idle, and jump out of the
- * run so the command loop stays alive. */
+/* Snapshot diagnostics for core 0, put the feed pins back to idle,
+ * and jump out of the run so the engine loop stays alive. */
 static void __attribute__((noreturn)) die(const char *why, uint16_t pc) {
-    printf("\n# !! %s at pc=%u ('%c')\n", why, pc,
-           pc < n_ops ? OP_CHAR[ops[pc]] : '?');
-    static const char *sel_name[4] = {"data", "ptr", "pc", "bstack"};
+    bf_shared.died.why = why;
+    bf_shared.died.pc = pc;
+    bf_shared.died.op = pc < bf_n_ops ? OP_CHAR[bf_ops[pc]] : '?';
     for (uint sel = 0; sel < 4; sel++) {
         set_inspect_sel(sel);
         busy_wait_us(asic_clks_us(4u));
-        printf("#    inspect %-6s = 0x%02x\n", sel_name[sel],
-               inspect_from(gpio_snapshot()));
+        bf_shared.died.inspect[sel] = inspect_from(gpio_snapshot());
     }
-    printf("#    irq_jump=%d irq_io=%d tx_clk=%d spi_cs=%d\n",
-           gpio_get(PIN_IRQ_JUMP), gpio_get(PIN_IRQ_IO), gpio_get(PIN_TX_CLK),
-           gpio_get(PIN_SPI_CS));
+    bf_shared.died.irq_jump = (uint8_t)gpio_get(PIN_IRQ_JUMP);
+    bf_shared.died.irq_io = (uint8_t)gpio_get(PIN_IRQ_IO);
+    bf_shared.died.tx_clk = (uint8_t)gpio_get(PIN_TX_CLK);
+    bf_shared.died.spi_cs = (uint8_t)gpio_get(PIN_SPI_CS);
     gpio_put(PIN_INSTR_VALID, 0);
     gpio_put(PIN_RX_CLK, 0);
     gpio_put(PIN_RX_BIT, 0);
     set_inspect_sel(INSPECT_PC);
-    longjmp(bf_err, 1);
+    ev_push(BF_EV_DIED, 0);
+    longjmp(bf_err, JMP_DIE);
 }
 
-/* Host stop (CH_STOP): put the feed pins back to idle and leave the
- * run without the diagnostic dump. The next session's reset gives
- * the ASIC a fresh state. */
-static void __attribute__((noreturn)) stop_run(void) {
+static void __attribute__((noreturn)) leave_run(int code) {
     gpio_put(PIN_INSTR_VALID, 0);
     gpio_put(PIN_RX_CLK, 0);
     gpio_put(PIN_RX_BIT, 0);
     set_inspect_sel(INSPECT_PC);
-    longjmp(bf_err, 2);
+    longjmp(bf_err, code);
+}
+
+static void __attribute__((noreturn)) stop_run(void) { leave_run(JMP_STOP); }
+static void __attribute__((noreturn)) lost_host(void) {
+    leave_run(JMP_HOST_LOST);
 }
 
 /* ---- execution ----
  *
- * Two silicon bugs shape this loop (confirmed by step-mode traces,
+ * Silicon bugs that shape this loop (confirmed by step-mode traces,
  * 2026-08-01; see README "Known issues"):
  *
  * 1. serial_tx re-arms on a stale start strobe: every ASIC->MCU frame
- *    is followed by an identical phantom frame. recv10() consumes it
- *    in the same interrupts-off window so it cannot collide with the
- *    next handshake.
+ *    is followed by an identical phantom frame. recv10() consumes it.
  *
  * 2. The SPI cache-refill FSM re-issues its transaction forever (the
- *    transfer_done exit is unreachable). The host therefore never
+ *    transfer_done exit is unreachable). The engine therefore never
  *    feeds a pointer move that would leave the ASIC's cache window
  *    (physical cells 0..8): it virtualizes such moves through the
  *    working '.'/',' serial paths and keeps the full 1024-cell tape
- *    in vtape. Synthetic ops advance the ASIC's PC, so the host
+ *    in vtape. Synthetic ops advance the ASIC's PC, so the engine
  *    models it in `apc`, separate from the program index `pc`.
  *
  * 3. Physical cell 4 (tape_base) has no backing store in the RTL:
  *    the cache mux returns data_current for offset 0 and the save
  *    path drops the value when the pointer leaves. Reads alias the
- *    value carried in; writes are lost. The host therefore never
+ *    value carried in; writes are lost. The engine therefore never
  *    parks on physical cell 4 — logical cell L maps to physical L
  *    for L < 4 and L + 1 for L >= 4, and the logical 3<->4 move
  *    feeds two physical moves (transit through cell 4 is safe).
@@ -432,13 +359,10 @@ static uint8_t vtape[1024];
 
 /* Feed a synthetic '.' and return data_current (the current cell). */
 static uint8_t synth_out(uint8_t apc_next, uint16_t pc) {
-    uint32_t save = save_and_disable_interrupts();
-    feed_instr_raw(OP_OUT);
-    event_t ev = await_pc_or_irq(apc_next, PIN_IRQ_IO, PC_TIMEOUT_US);
-    int v = ev == EV_IRQ ? recv10_raw(SERIAL_TIMEOUT_US) : -1;
-    restore_interrupts(save);
-    if (ev != EV_IRQ)
+    feed_instr(OP_OUT);
+    if (await_pc_or_irq(apc_next, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
         die("no interrupt_io for synthetic '.'", pc);
+    int v = recv10(SERIAL_TIMEOUT_US);
     if (v < 0)
         die("no data for synthetic '.'", pc);
     if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
@@ -480,7 +404,7 @@ static void state_init(bf_state_t *s) {
  * handshake failure. Inline so the run loop pays no call cost. */
 static inline void exec_one(bf_state_t *s) {
     {
-        uint8_t op = ops[s->pc];
+        uint8_t op = bf_ops[s->pc];
         uint8_t anext = (uint8_t)(s->apc + 1); /* ASIC PC low byte after op */
 
         switch (op) {
@@ -557,7 +481,7 @@ static inline void exec_one(bf_state_t *s) {
                 if (s->sp < count_of(s->abstack))
                     s->abstack[s->sp] = s->apc;
                 s->sp++;
-                s->pc = match[s->pc];
+                s->pc = bf_match[s->pc];
             } else {
                 die("no response to '['", s->pc);
             }
@@ -565,29 +489,26 @@ static inline void exec_one(bf_state_t *s) {
         }
 
         case OP_CLOSE: {
-            /* Interrupts off from the feed through the TX frames:
-             * a USB interrupt in that span outlasts the frames and
-             * the jump target is lost. */
-            uint32_t save = save_and_disable_interrupts();
-            feed_instr_raw(op);
+            feed_instr(op);
             s->executed++;
             event_t ev = await_pc_or_irq(anext, PIN_IRQ_JUMP, PC_TIMEOUT_US);
-            int tgt = ev == EV_IRQ ? recv10_raw(SERIAL_TIMEOUT_US) : -1;
-            restore_interrupts(save);
             if (ev == EV_PC_ADVANCED) { /* data==0: exited loop */
                 if (s->sp)
                     s->sp--;
                 s->apc++;
                 s->pc++;
             } else if (ev == EV_IRQ) { /* data!=0: ASIC transmits target */
+                int tgt = recv10(SERIAL_TIMEOUT_US);
                 if (tgt < 0)
                     die("no jump target transmitted for ']'", s->pc);
                 if (!wait_gpio_low(PIN_IRQ_JUMP, SERIAL_TIMEOUT_US))
                     die("interrupt_jump stuck after ']'", s->pc);
-                if (s->sp && (uint16_t)tgt != (s->abstack[s->sp - 1] & 0x3FF))
-                    printf("# !! ']' at %u jumped to %d, expected %u "
-                           "(bracket stack desync?)\n",
-                           s->pc, tgt, s->abstack[s->sp - 1] & 0x3FF);
+                if (s->sp && (uint16_t)tgt != (s->abstack[s->sp - 1] & 0x3FF)) {
+                    bf_shared.desync.pc = s->pc;
+                    bf_shared.desync.tgt = tgt;
+                    bf_shared.desync.expect = s->abstack[s->sp - 1] & 0x3FF;
+                    ev_push(BF_EV_DESYNC, 0);
+                }
                 uint16_t back;
                 if (s->sp >= 2) {
                     /* Silicon: the WAIT_JUMP start branch fires twice
@@ -613,7 +534,7 @@ static inline void exec_one(bf_state_t *s) {
                         die("PC never reached jump target", s->pc);
                     s->apc = back;
                 }
-                s->pc = match[s->pc]; /* the matching '[' re-executes */
+                s->pc = bf_match[s->pc]; /* the matching '[' re-executes */
             } else {
                 die("no response to ']'", s->pc);
             }
@@ -625,11 +546,11 @@ static inline void exec_one(bf_state_t *s) {
             s->executed++;
             if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for ','", s->pc);
-            int c = host_getchar();
-            if (c < 0)
-                die("host disconnected during ','", s->pc);
-            if (c == CH_STOP)
+            int c = in_wait();
+            if (c == -1)
                 stop_run();
+            if (c == -2)
+                lost_host();
             if (c == CH_EOF)
                 c = 0; /* end of input: ',' reads 0 */
             busy_wait_us(rx_settle_us);
@@ -644,22 +565,20 @@ static inline void exec_one(bf_state_t *s) {
         }
 
         case OP_OUT: {
-            uint32_t save = save_and_disable_interrupts();
-            feed_instr_raw(op);
+            feed_instr(op);
             s->executed++;
-            event_t ev = await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US);
-            int v = ev == EV_IRQ ? recv10_raw(SERIAL_TIMEOUT_US) : -1;
-            restore_interrupts(save);
-            if (ev != EV_IRQ)
+            if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for '.'", s->pc);
+            int v = recv10(SERIAL_TIMEOUT_US);
             if (v < 0)
                 die("no data transmitted for '.'", s->pc);
-            putchar(v & 0xFF);
-            stdio_flush();
             if (!wait_gpio_low(PIN_IRQ_IO, SERIAL_TIMEOUT_US))
                 die("interrupt_io stuck after '.'", s->pc);
             if (!wait_pc_low(anext, PC_TIMEOUT_US))
                 die("'.' never retired", s->pc);
+            /* Emit after the op retires: a full FIFO then stalls the
+             * engine between instructions, never mid-handshake. */
+            ev_push(BF_EV_OUT, (uint32_t)(v & 0xFF));
             s->apc++;
             s->pc++;
             break;
@@ -668,70 +587,66 @@ static inline void exec_one(bf_state_t *s) {
     }
 }
 
-static void run(bf_state_t *s) {
-    uint32_t n = 0;
-    while (s->pc < n_ops) {
-        exec_one(s);
-        if ((++n & 0xFFu) == 0 && host_wants_stop())
-            stop_run();
-    }
-    printf("\n# halted: %lu instructions executed\n",
-           (unsigned long)s->executed);
+/* One check per instruction: stop and disconnect end the run at the
+ * next instruction boundary. */
+static void check_host(void) {
+    if (bf_shared.stop_req)
+        stop_run();
+    if (bf_shared.host_lost)
+        lost_host();
 }
 
-const char *bf_run_session(void) {
-    inq_reset();
-    if (!read_program())
-        return "bad-program";
-    if (!build_jump_table())
-        return "bad-program";
-    asic_reset();
-
+static bf_result_t engine_run(void) {
     gpio_put(TT_PIN_LED, 1);
     bf_state_t st;
-    state_init(&st);
-    const char *result = NULL;
+    bf_result_t res;
     switch (setjmp(bf_err)) {
     case 0:
-        run(&st);
+        if (!asic_reset())
+            die("reset did not clear the design", 0);
+        state_init(&st);
+        while (st.pc < bf_n_ops) {
+            check_host();
+            exec_one(&st);
+        }
+        bf_shared.executed = st.executed;
+        ev_push(BF_EV_HALTED, 0);
+        res = BF_RES_OK;
         break;
-    case 2:
-        printf("\n# stopped by host\n");
-        result = "stopped";
+    case JMP_STOP:
+        ev_push(BF_EV_STOPPED, 0);
+        res = BF_RES_STOPPED;
+        break;
+    case JMP_HOST_LOST:
+        res = BF_RES_HOST_LOST;
         break;
     default:
-        result = "run-fail";
+        res = BF_RES_RUN_FAIL; /* die() already pushed BF_EV_DIED */
         break;
     }
     gpio_put(TT_PIN_LED, 0);
-    return result;
+    return res;
 }
 
 /* ---- instruction-level debugger ---- */
 
-/* Read one inspect value with the mux settled. */
-static uint8_t inspect_read(uint sel) {
-    set_inspect_sel(sel);
-    busy_wait_us(asic_clks_us(4u));
-    return inspect_from(gpio_snapshot());
-}
-
-/* One machine-parseable state line per step. inspect_sel returns to
- * PC afterward: the retirement handshake depends on it. */
-static void print_dbg_state(const bf_state_t *s) {
-    uint8_t data = inspect_read(INSPECT_DATA);
-    uint8_t bstk = inspect_read(INSPECT_BSTACK);
+/* Snapshot one state line per step. inspect_sel returns to PC
+ * afterward: the retirement handshake depends on it. */
+static void dbg_state(const bf_state_t *s) {
+    bf_shared.dbg.data = inspect_read(INSPECT_DATA);
+    bf_shared.dbg.bstk = inspect_read(INSPECT_BSTACK);
     set_inspect_sel(INSPECT_PC);
     busy_wait_us(asic_clks_us(4u));
-    printf("# dbg pc=%u op=%c vptr=%u data=%02x bstk=%02x exec=%lu\n",
-           s->pc, s->pc < n_ops ? OP_CHAR[ops[s->pc]] : '-', s->vptr, data,
-           bstk, (unsigned long)s->executed);
-    stdio_flush();
+    bf_shared.dbg.pc = s->pc;
+    bf_shared.dbg.op = s->pc < bf_n_ops ? OP_CHAR[bf_ops[s->pc]] : '-';
+    bf_shared.dbg.vptr = s->vptr;
+    bf_shared.dbg.exec = s->executed;
+    ev_push(BF_EV_DBG, 0);
 }
 
 /* Breakpoints on program indexes. Cleared at each session start;
  * the host re-sends its set. */
-static uint8_t bp[MAX_OPS / 8];
+static uint8_t bp[BF_MAX_OPS / 8];
 
 static inline bool bp_get(uint16_t i) {
     return (bp[i >> 3] >> (i & 7)) & 1;
@@ -743,78 +658,98 @@ static void bp_command(void) {
     uint32_t v = 0;
     bool any = false;
     for (;;) {
-        int c = getchar_timeout_us(200000);
+        absolute_time_t dl = make_timeout_time_us(200000);
+        int c;
+        while ((c = bf_in_get()) < 0) {
+            if (time_reached(dl) || bf_shared.stop_req ||
+                bf_shared.host_lost)
+                break;
+        }
         if (c < '0' || c > '9')
             break;
         v = v * 10 + (uint32_t)(c - '0');
         any = true;
     }
-    if (!any || v >= n_ops) {
-        printf("# dbg bp out of range\n");
+    if (!any || v >= bf_n_ops) {
+        ev_push(BF_EV_BP_ERR, 0);
         return;
     }
     bp[v >> 3] ^= (uint8_t)(1u << (v & 7));
-    printf("# dbg bp %s %lu\n", bp_get((uint16_t)v) ? "set" : "clear",
-           (unsigned long)v);
-    stdio_flush();
+    ev_push(bp_get((uint16_t)v) ? BF_EV_BP_SET : BF_EV_BP_CLEAR, v);
 }
 
-/* Like bf_run_session(), but the host paces execution: 'n' runs one
- * instruction, 'c' runs to the next breakpoint or the end, 'q' stops
- * the session. */
-const char *bf_debug_session(void) {
-    inq_reset();
-    if (!read_program())
-        return "bad-program";
-    if (!build_jump_table())
-        return "bad-program";
-    asic_reset();
-
+/* Like engine_run(), but the host paces execution: 'n' runs one
+ * instruction, 'c' runs to the next breakpoint or the end, 'q' (or
+ * CH_STOP at the prompt) ends the session. */
+static bf_result_t engine_debug(void) {
     gpio_put(TT_PIN_LED, 1);
     bf_state_t st;
-    state_init(&st);
-    memset(bp, 0, sizeof bp);
     int j = setjmp(bf_err);
     if (j) {
         gpio_put(TT_PIN_LED, 0);
-        return j == 2 ? "stopped" : "run-fail";
+        if (j == JMP_STOP) {
+            ev_push(BF_EV_STOPPED, 0);
+            return BF_RES_STOPPED;
+        }
+        return j == JMP_HOST_LOST ? BF_RES_HOST_LOST : BF_RES_RUN_FAIL;
     }
-    printf("# dbg ready: n=step c=continue q=quit b<n>=breakpoint\n");
-    print_dbg_state(&st);
-    while (st.pc < n_ops) {
-        int ch = host_getchar();
-        if (ch < 0) {
+    if (!asic_reset())
+        die("reset did not clear the design", 0);
+    state_init(&st);
+    memset(bp, 0, sizeof bp);
+    ev_push(BF_EV_DBG_READY, 0);
+    dbg_state(&st);
+    while (st.pc < bf_n_ops) {
+        int ch = in_wait();
+        if (ch == -2) {
             gpio_put(TT_PIN_LED, 0);
-            return "host-lost";
+            return BF_RES_HOST_LOST;
         }
         if (ch == 'n') {
             exec_one(&st);
-            print_dbg_state(&st);
+            dbg_state(&st);
         } else if (ch == 'c') {
             /* at least one instruction, so a continue from a
              * breakpoint does not stop on the same spot */
-            uint32_t n = 0;
             do {
+                check_host();
                 exec_one(&st);
-                if ((++n & 0xFFu) == 0 && host_wants_stop())
-                    stop_run();
-            } while (st.pc < n_ops && !bp_get(st.pc));
-            if (st.pc < n_ops) {
-                printf("# dbg break at %u\n", st.pc);
-                print_dbg_state(&st);
+            } while (st.pc < bf_n_ops && !bp_get(st.pc));
+            if (st.pc < bf_n_ops) {
+                ev_push(BF_EV_BREAK, st.pc);
+                dbg_state(&st);
             }
         } else if (ch == 'b') {
             bp_command();
-        } else if (ch == 'q' || ch == CH_STOP) {
+        } else if (ch == 'q' || ch == -1) {
             gpio_put(TT_PIN_LED, 0);
-            printf("# dbg stopped by host\n");
-            return NULL;
+            ev_push(BF_EV_DBG_QUIT, 0);
+            return BF_RES_OK;
         }
         /* other bytes (line ends and so on) are ignored */
     }
-    if (st.pc >= n_ops)
-        printf("\n# halted: %lu instructions executed\n",
-               (unsigned long)st.executed);
+    bf_shared.executed = st.executed;
+    ev_push(BF_EV_HALTED, 0);
     gpio_put(TT_PIN_LED, 0);
-    return NULL;
+    return BF_RES_OK;
+}
+
+/* ---- core 1 entry ---- */
+
+void bf_core1_main(void) {
+    for (;;) {
+        uint32_t cmd = multicore_fifo_pop_blocking();
+        __dmb();
+        /* Interrupts stay off for the whole session. The SDK arms
+         * FIFO/lockout handlers on this core at launch, and one
+         * stray interrupt mid-pulse stretches instr_valid across
+         * two rising edges: the instruction executes twice. The
+         * engine only polls (pins, ring, FIFO, timer), so it needs
+         * no interrupts. */
+        uint32_t save = save_and_disable_interrupts();
+        bf_result_t res =
+            cmd == BF_CMD_DEBUG ? engine_debug() : engine_run();
+        restore_interrupts(save);
+        ev_push(BF_EV_END, (uint32_t)res);
+    }
 }

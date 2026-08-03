@@ -3,10 +3,10 @@
  *
  * The whole BF integration is this file: it defines the kit's
  * extension hooks (kit/firmware/include/ext.h) to add the `bf` and
- * `bfdbg` commands, launch the SPI RAM emulator on core 1, follow
+ * `bfdbg` commands, launch the execution engine on core 1, follow
  * clock and design changes, and report the BF design address in
- * hello/status. bf_run.c is the engine and spi_ram.c the tape. The
- * kit core is untouched.
+ * hello/status. bf_run.c is the core-1 engine, bf_session.c the
+ * core-0 session pump. The kit core is untouched.
  */
 #include <stdio.h>
 #include <string.h>
@@ -16,9 +16,9 @@
 
 #include "bf_pins.h"
 #include "bf_run.h"
+#include "bf_session.h"
 #include "clock.h"
 #include "ext.h"
-#include "spi_ram.h"
 
 #define BF_MIN_HZ 50000u   /* below this, feed_instr's interrupts-off \
                               window starves USB and the 200 ms       \
@@ -42,15 +42,14 @@ static const char *bf_precheck(void) {
     return NULL;
 }
 
-static const char *bf_common(const char *banner,
-                             const char *(*session)(void)) {
+static const char *bf_common(const char *banner, bool debug) {
     const char *err = bf_precheck();
     if (err)
         return err;
     pins_bf();
     bf_armed = true;
     printf("ok %s\n", banner);
-    err = session();
+    err = bf_session(debug);
     /* Drain input the program did not consume (e.g. ',' bytes left
      * over after an error) so it cannot pollute the next command. */
     while (getchar_timeout_us(100000) != PICO_ERROR_TIMEOUT)
@@ -64,13 +63,13 @@ static const char *bf_common(const char *banner,
 static const char *cmd_bf(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    return bf_common("bf", bf_run_session);
+    return bf_common("bf", false);
 }
 
 static const char *cmd_bfdbg(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    return bf_common("bfdbg", bf_debug_session);
+    return bf_common("bfdbg", true);
 }
 
 static const struct cmd bf_cmds[] = {
@@ -86,7 +85,7 @@ const struct cmd *ext_commands(size_t *count) {
 }
 
 void ext_init(void) {
-    multicore_launch_core1(spi_ram_core1_entry);
+    multicore_launch_core1(bf_core1_main);
 }
 
 void ext_hello(char *out, size_t cap) {
@@ -105,13 +104,4 @@ void ext_design_changed(unsigned addr) {
 void ext_clock_changed(uint32_t hz) {
     (void)hz;
     bf_timing_update();
-}
-
-/* Park extension hardware whenever the safe profile applies: core 1
- * must never drive MISO while another design owns the uio pins. The
- * CS pull-up is weak, cannot fight a driven pad, and keeps core 1
- * idle when the BF design is not routed (see spi_ram.c). */
-void ext_release_pins(void) {
-    spi_ram_set_enabled(false);
-    gpio_pull_up(PIN_SPI_CS);
 }

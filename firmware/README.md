@@ -10,21 +10,31 @@ This firmware is an extension of the
 [terminal-explorer kit](https://github.com/map588/tt_terminal_explorer),
 pulled in as the `kit/` submodule. The kit core provides the command
 protocol, the PIO clock, the pin control, and the carrier probe. The
-whole BF integration is one file, `src/bf_ext.c`, which defines
-the kit's extension hooks (`kit/firmware/include/ext.h`): the
-`bf`/`bfdbg` commands, the core-1 SPI RAM launch, the `bf=448` hello
-field, serial timings that follow the clock, and the pin parking
-that keeps core 1 off foreign designs.
+BF integration is `src/bf_ext.c`, which defines the kit's extension
+hooks (`kit/firmware/include/ext.h`): the `bf`/`bfdbg` commands, the
+core-1 engine launch, the `bf=448` hello field, and serial timings
+that follow the clock.
 
 The build makes one UF2, `tt_host`: select any shuttle design, set
 or single-step the clock, peek and poke pins, and run BF as a
 command. The `../explorer` TUI drives it, and a bare terminal
 (`tio`, `screen`) works too.
 
-The BF engine (`src/bf_run.c`) feeds the program one instruction at
-a time, mirrors the ASIC's PC, answers `interrupt_jump` with the
-precomputed bracket-match table, and bridges `,`/`.` to serial. The
-SPI RAM tape slave runs on core 1 (`src/spi_ram.c`).
+The two RP2350 cores split the work. Core 1 runs the execution
+engine (`src/bf_run.c`) with interrupts off: it feeds the program
+one instruction at a time, mirrors the ASIC's PC, answers
+`interrupt_jump` with the precomputed bracket-match table, and
+drives the `,`/`.` serial links with deterministic timing. Core 0
+runs USB and the session pump (`src/bf_session.c`): it parses the
+program, moves input bytes and the Ctrl-C stop flag to the engine,
+and renders engine events as text. The mailbox between them is the
+SIO FIFO plus a shared struct (`include/bf_link.h`). Session output
+bytes go out raw: a 0x0A cell prints as one byte, not CRLF.
+
+`src/spi_ram.c` (the SPI RAM tape slave core 1 ran before it became
+the engine) stays in the tree as reference and is not built: the
+on-chip SPI path never completes a transaction on this silicon (bug
+1 below), so the tape lives in MCU RAM.
 
 ## Silicon bugs and their firmware workarounds
 
@@ -130,7 +140,8 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
    parks `inspect_sel` on PC and treats "PC low byte == expected" as the
    instruction-retired handshake, which covers the stall transparently.
 
-3. **`spi_master` SCK phase bug (workaround in `spi_ram.c`).** SCK
+3. **`spi_master` SCK phase bug (workaround in `spi_ram.c`, kept as
+   reference).** SCK
    free-runs even while CS is high and is not forced low when a transfer
    starts, so with 50% probability the master's bit counter eats the
    first command bit and only 7 of the 8 command bits ever reach the
@@ -148,8 +159,10 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
    end
    ```
 
-4. **Bracket-stack depth is 8.** Deeper nesting silently drops pushes;
-   the loader warns at boot if the program nests deeper.
+4. **Bracket-stack depth is 7.** The stack has 8 slots, but the RTL
+   push guard (`bstack_ptr < 7`) stops one early, so 7 entries are
+   usable. Deeper nesting silently drops pushes; the loader warns
+   when a program nests past 7.
 
 5. **`[` skip semantics.** On a taken forward skip the ASIC pushes its PC
    *before* waiting, and expects to be told the address **of** the

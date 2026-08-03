@@ -53,4 +53,4 @@ Two interrupt signals notify the MCU: `interrupt_jump` for bracket operations re
 
 ## External hardware
 
-- The Tiny Tapeout demo board (RP2350) running [the host firmware](https://github.com/map588/tt_um_brainfck_asic/tree/main/firmware): one core feeds instructions and services the I/O and bracket-jump interrupts, the other emulates the SPI RAM "tape".
+- The Tiny Tapeout demo board (RP2350) running [the host firmware](https://github.com/map588/tt_um_brainfck_asic/tree/main/firmware): one core runs the execution engine (instruction feed, I/O and bracket-jump interrupts, the tape), the other runs USB and the command protocol.
