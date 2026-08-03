@@ -16,20 +16,16 @@ set(BF_SRCS
     src/spi_ram.c
 )
 
-# bf_host: standalone BF paste-and-run firmware (own main, no
-# command protocol).
-add_executable(bf_host src/bf_main.c ${BF_SRCS})
-
 # tt_host: the kit's command firmware plus the BF extension.
-add_executable(tt_host ${TT_CORE_MAIN} src/bf_ext.c ${BF_SRCS})
+tt_extension(tt_host src/bf_ext.c ${BF_SRCS})
+target_include_directories(tt_host PRIVATE include)
+target_link_libraries(tt_host pico_multicore)
 
-foreach(target bf_host tt_host)
-    target_include_directories(${target} PRIVATE include)
-    target_link_libraries(${target}
-        tt_core
-        pico_multicore
-    )
-    pico_enable_stdio_usb(${target} 1)
-    pico_enable_stdio_uart(${target} 0)
-    pico_add_extra_outputs(${target})
-endforeach()
+# bf_host: standalone BF paste-and-run firmware. It replaces the
+# kit main, so it uses add_executable directly.
+add_executable(bf_host src/bf_main.c ${BF_SRCS})
+target_include_directories(bf_host PRIVATE include)
+target_link_libraries(bf_host tt_core pico_multicore)
+pico_enable_stdio_usb(bf_host 1)
+pico_enable_stdio_uart(bf_host 0)
+pico_add_extra_outputs(bf_host)
