@@ -2,10 +2,12 @@
  * BF execution engine for tt_um_brainfck_asic. Runs on CORE 1.
  *
  * Core 1 takes no interrupts, so every bit-banged handshake below
- * runs with deterministic timing and no masking. Core 0 owns USB and
- * all text output; this file talks to it only through the mailbox in
- * bf_link.h (input ring in, SIO FIFO events out). bf_session.c is
- * the core-0 side.
+ * runs with deterministic timing and no masking. The ASIC->MCU
+ * serial link is sampled by a PIO state machine (bf_pio.c), so its
+ * bit timing does not depend on the CPU at all. Core 0 owns USB
+ * and all text output; this file talks to it only through the
+ * mailbox in bf_link.h (input ring in, SIO FIFO events out).
+ * bf_session.c is the core-0 side.
  *
  * Handshake model
  * ---------------
@@ -36,6 +38,7 @@
 
 #include "bf_link.h"
 #include "bf_pins.h"
+#include "bf_pio.h"
 #include "bf_run.h"
 #include "board.h"
 #include "clock.h"
@@ -74,11 +77,13 @@ void bf_timing_update(void) {
 
 /* BF pin roles on top of the safe profile. The 8 ui pins are already
  * MCU outputs (instr, instr_valid, rx clk/bit, inspect_sel). MISO is
- * driven low so the ASIC's SPI input does not float. */
+ * driven low so the ASIC's SPI input does not float. The PIO
+ * receiver is armed fresh for the session. */
 void pins_bf(void) {
     pins_safe();
     gpio_put(PIN_SPI_MISO, 0);
     gpio_set_dir(PIN_SPI_MISO, GPIO_OUT);
+    bf_pio_arm();
 }
 
 /* ---- mailbox ---- */
@@ -196,7 +201,8 @@ static bool wait_gpio_low(uint pin, uint32_t timeout_us) {
 
 /* MCU->ASIC: serial_rx samples RX_BIT on the (synchronized) rising edge of
  * RX_CLK; each phase is held for several ASIC clocks to clear the two-flop
- * synchronizer.  MSB first. */
+ * synchronizer.  MSB first. The MCU paces this link itself, so it needs no
+ * PIO: every phase has multi-clock margin by construction. */
 static void __not_in_flash_func(send10)(uint16_t v) {
     for (int i = 9; i >= 0; i--) {
         gpio_put(PIN_RX_BIT, (v >> i) & 1);
@@ -208,58 +214,36 @@ static void __not_in_flash_func(send10)(uint16_t v) {
     }
 }
 
-/* ASIC->MCU: TX_CLK idles high, drops to announce a transfer, then each
- * of the 10 bits (MSB first) is stable from one rising edge to the next.
- * Sample one frame; TX_CLK must already be low (start seen). In RAM so
- * core-0 flash traffic cannot stall a 2-ASIC-clock bit window. */
-static bool __not_in_flash_func(sample10)(uint16_t *out, absolute_time_t dl) {
-    uint16_t v = 0;
-    for (int i = 0; i < 10; i++) {
-        while (!gpio_get(PIN_TX_CLK)) {
-            if (time_reached(dl))
-                return false;
-        }
-        v = (uint16_t)((v << 1) | gpio_get(PIN_TX_BIT));
-        while (gpio_get(PIN_TX_CLK)) {
-            if (time_reached(dl))
-                return false;
-        }
-    }
-    *out = v;
-    return true;
-}
-
-/* Receive one frame and swallow its phantom repeat (silicon bug 2:
- * serial_tx re-arms on a stale start strobe, so every frame repeats
- * once). Core 1 takes no interrupts, so nothing can outlast the
- * frames between the samples. Returns the first frame's value, or -1
- * on timeout. */
-static int __not_in_flash_func(recv10)(uint32_t timeout_us) {
-    absolute_time_t dl = make_timeout_time_us(timeout_us);
-    while (gpio_get(PIN_TX_CLK)) { /* wait for start (clock drop) */
-        if (time_reached(dl))
-            return -1;
-    }
-    uint16_t v = 0, junk = 0;
-    if (!sample10(&v, dl))
+/* ASIC->MCU: receive one frame and swallow its phantom repeat
+ * (silicon bug 2: serial_tx re-arms on a stale start strobe, so
+ * every frame repeats once). The PIO receive machine (bf_pio.c)
+ * pushes each frame as one FIFO word. Returns the first frame's
+ * value, or -1 on timeout. */
+static int recv10(uint32_t timeout_us) {
+    int v = bf_pio_recv_frame(timeout_us);
+    if (v < 0)
         return -1;
-    /* The phantom start comes within a few ASIC clocks; bound the
-     * wait so a genuinely missing phantom fails fast. */
-    absolute_time_t pdl = make_timeout_time_us(asic_clks_us(64u));
-    while (!time_reached(pdl)) {
-        if (!gpio_get(PIN_TX_CLK)) {
-            if (!sample10(&junk, dl))
-                return -1;
-            for (uint n = TX_DISARM_EDGES; n--;) {
-                while (!gpio_get(TT_PIN_PROJ_CLK))
-                    tight_loop_contents();
-                while (gpio_get(TT_PIN_PROJ_CLK))
-                    tight_loop_contents();
-            }
-            return v;
-        }
+    /* The phantom start comes within a few ASIC clocks and its
+     * frame takes a few tens more; bound the wait so a genuinely
+     * missing phantom fails fast. */
+    if (bf_pio_recv_frame(asic_clks_us(192u)) < 0)
+        return -1;
+    /* The machine pushes the phantom word at its 10th rising edge,
+     * before the frame's last low phase runs out. Wait for TX_CLK
+     * to idle high again so the disarm count starts where the
+     * bit-banged receiver started it: after the frame ended. */
+    absolute_time_t dl = make_timeout_time_us(asic_clks_us(64u));
+    while (!gpio_get(PIN_TX_CLK)) {
+        if (time_reached(dl))
+            break;
     }
-    return -1;
+    for (uint n = TX_DISARM_EDGES; n--;) {
+        while (!gpio_get(TT_PIN_PROJ_CLK))
+            tight_loop_contents();
+        while (gpio_get(TT_PIN_PROJ_CLK))
+            tight_loop_contents();
+    }
+    return v;
 }
 
 /* Read one inspect value with the mux settled. */
@@ -282,8 +266,14 @@ static bool asic_reset(void) {
         uint8_t data = inspect_read(INSPECT_DATA);
         set_inspect_sel(INSPECT_PC);
         busy_wait_us(asic_clks_us(4u));
-        if (pc == 0 && data == 0)
+        if (pc == 0 && data == 0) {
+            /* Settle before the first feed. A run started hard
+             * against the verified reset showed rare first-op
+             * misexecution (same footprint as the stale-reset
+             * silicon bug); a few quiet clocks close it. */
+            busy_wait_us(asic_clks_us(8u));
             return true;
+        }
     }
     return false;
 }
@@ -749,6 +739,7 @@ void bf_core1_main(void) {
         uint32_t save = save_and_disable_interrupts();
         bf_result_t res =
             cmd == BF_CMD_DEBUG ? engine_debug() : engine_run();
+        bf_pio_idle();
         restore_interrupts(save);
         ev_push(BF_EV_END, (uint32_t)res);
     }

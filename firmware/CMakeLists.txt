@@ -16,8 +16,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 # on disk as reference and is not built.
 tt_extension(tt_host
     src/bf_ext.c
+    src/bf_pio.c
     src/bf_run.c
     src/bf_session.c
 )
 target_include_directories(tt_host PRIVATE include)
-target_link_libraries(tt_host pico_multicore)
+target_link_libraries(tt_host pico_multicore hardware_pio)
