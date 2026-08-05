@@ -1,22 +1,26 @@
 [project]
-name = "tt-explorer"
-version = "0.1.0"
-description = "TUI to explore Tiny Tapeout designs through the tt-explorer firmware"
+name = "bf-explorer"
+version = "0.2.0"
+description = "The terminal-explorer kit TUI extended with a Brainf*ck tab"
 requires-python = ">=3.11"
 dependencies = [
-    "textual>=0.80",
-    "pyserial>=3.5",
+    "tt-explorer",
 ]
 
 [project.scripts]
-tt-explorer = "tt_explorer.app:main"
+bf-explorer = "bf_explorer.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tt_explorer"]
+packages = ["src/bf_explorer"]
+
+# The kit UI comes from the firmware/kit submodule, so one submodule
+# pin versions the firmware and the UI together.
+[tool.uv.sources]
+tt-explorer = { path = "../firmware/kit/explorer", editable = true }
 
 [dependency-groups]
 dev = ["pytest>=8"]
