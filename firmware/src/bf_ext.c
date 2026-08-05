@@ -23,12 +23,12 @@
 #define BF_MIN_HZ 50000u   /* below this, feed_instr's interrupts-off \
                               window starves USB and the 200 ms       \
                               handshake timeouts trip */
-#define BF_MAX_HZ 2000000u /* hard cap: the CPU cannot pace the        \
-                              instr_valid pulse at all above this.     \
-                              The receive link is PIO-sampled and no   \
-                              longer limits; the CPU-paced feed is     \
-                              solid at 200 kHz and starts to fail      \
-                              around 500 kHz (measured 2026-08-04) */
+#define BF_MAX_HZ 2000000u /* validated top of the range. The feed     \
+                              pulse and the receive link both run on   \
+                              PIO, and the full suite passes at this   \
+                              cap (measured 2026-08-05). Above it the  \
+                              CPU-paced parts (disarm edge count, the  \
+                              send link pacing) are unproven. */
 
 static int bf_design = -1; /* tracked via ext_design_changed */
 static bool bf_armed;

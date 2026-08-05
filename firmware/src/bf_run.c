@@ -2,11 +2,12 @@
  * BF execution engine for tt_um_brainfck_asic. Runs on CORE 1.
  *
  * Core 1 takes no interrupts, so every bit-banged handshake below
- * runs with deterministic timing and no masking. The ASIC->MCU
- * serial link is sampled by a PIO state machine (bf_pio.c), so its
- * bit timing does not depend on the CPU at all. Core 0 owns USB
- * and all text output; this file talks to it only through the
- * mailbox in bf_link.h (input ring in, SIO FIFO events out).
+ * runs with deterministic timing and no masking. The two edge-
+ * critical handshakes run on PIO machines (bf_pio.c): the ASIC->MCU
+ * serial link is sampled there, and the instr_valid pulse is
+ * generated there, so neither depends on CPU timing at all. Core 0
+ * owns USB and all text output; this file talks to it only through
+ * the mailbox in bf_link.h (input ring in, SIO FIFO events out).
  * bf_session.c is the core-0 side.
  *
  * Handshake model
@@ -24,9 +25,8 @@
  *   ','        : interrupt_io,   ASIC waits on RX -> send {2'b00, byte}
  *
  * instr_valid is sampled every ASIC clock edge, so a sloppy pulse executes
- * an instruction twice.  The clock module generates the ASIC clock and we
- * pulse instr_valid from falling edge to falling edge — exactly one rising
- * edge sees it high.
+ * an instruction twice.  A PIO machine pulses it from falling edge to
+ * falling edge — exactly one rising edge sees it high.
  */
 #include <setjmp.h>
 #include <string.h>
@@ -131,23 +131,15 @@ static void set_inspect_sel(uint sel) {
 
 /* ---- instruction feed ---- */
 
-/* Assert instr_valid across exactly one rising edge of the ASIC clock:
- * raise it just after a falling edge, drop it just after the next one. */
-static void __not_in_flash_func(feed_instr)(uint8_t op) {
+/* Assert instr_valid across exactly one rising edge of the ASIC
+ * clock. The pulse itself runs on a PIO machine (bf_pio.c); the
+ * instruction pins are plain outputs and settle long before the
+ * machine reaches the edge. */
+static void feed_instr(uint8_t op) {
     gpio_put(PIN_INSTR0, op & 1);
     gpio_put(PIN_INSTR1, (op >> 1) & 1);
     gpio_put(PIN_INSTR2, (op >> 2) & 1);
-
-    while (!gpio_get(TT_PIN_PROJ_CLK))
-        tight_loop_contents();
-    while (gpio_get(TT_PIN_PROJ_CLK)) /* falling edge */
-        tight_loop_contents();
-    gpio_put(PIN_INSTR_VALID, 1);
-    while (!gpio_get(TT_PIN_PROJ_CLK)) /* rising edge: ASIC executes */
-        tight_loop_contents();
-    while (gpio_get(TT_PIN_PROJ_CLK)) /* falling edge */
-        tight_loop_contents();
-    gpio_put(PIN_INSTR_VALID, 0);
+    bf_pio_feed();
 }
 
 /* ---- completion / interrupt polling ---- */
@@ -295,7 +287,8 @@ static void __attribute__((noreturn)) die(const char *why, uint16_t pc) {
     bf_shared.died.irq_io = (uint8_t)gpio_get(PIN_IRQ_IO);
     bf_shared.died.tx_clk = (uint8_t)gpio_get(PIN_TX_CLK);
     bf_shared.died.spi_cs = (uint8_t)gpio_get(PIN_SPI_CS);
-    gpio_put(PIN_INSTR_VALID, 0);
+    /* instr_valid belongs to the PIO; bf_core1_main parks it via
+     * bf_pio_idle() right after the session ends. */
     gpio_put(PIN_RX_CLK, 0);
     gpio_put(PIN_RX_BIT, 0);
     set_inspect_sel(INSPECT_PC);
@@ -304,7 +297,6 @@ static void __attribute__((noreturn)) die(const char *why, uint16_t pc) {
 }
 
 static void __attribute__((noreturn)) leave_run(int code) {
-    gpio_put(PIN_INSTR_VALID, 0);
     gpio_put(PIN_RX_CLK, 0);
     gpio_put(PIN_RX_BIT, 0);
     set_inspect_sel(INSPECT_PC);

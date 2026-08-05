@@ -38,6 +38,23 @@
  * without sampling it. The machine runs at full system clock;
  * sampling lands ~3 system clocks after each edge, inside the
  * stable window at any ASIC clock.
+ *
+ * Feed (instr_valid on one rising edge), one pulse per FIFO word:
+ *
+ *   12: pull block                ; wait for a go word
+ *   13: wait 1 gpio PROJ_CLK
+ *   14: wait 0 gpio PROJ_CLK      ; start from a falling edge
+ *   15: set pins, 1               ; raise instr_valid
+ *   16: wait 1 gpio PROJ_CLK      ; the ASIC executes here
+ *   17: wait 0 gpio PROJ_CLK
+ *   18: set pins, 0               ; drop it
+ *   19: push block                ; completion token, wrap to 12
+ *
+ * The raise lands ~3 system clocks after the synchronized falling
+ * edge and the drop mirrors it, so the pulse spans exactly one
+ * rising edge with near half-period margin on both sides at any
+ * reachable clock. The CPU version could jitter by an ASIC clock
+ * under bus contention; this cannot.
  */
 #include "hardware/pio.h"
 #include "pico/stdlib.h"
@@ -47,7 +64,13 @@
 
 #define BF_PIO pio1
 #define SM_RECV 0u
+#define SM_FEED 1u
 #define OFF_RECV 0u
+#define OFF_FEED 12u
+
+/* A pulse is two clock edges. 200 ms covers it down to far below
+ * the usable clock range; past that the clock is stopped. */
+#define FEED_TIMEOUT_US 200000u
 
 static bool pio_ready;
 
@@ -76,25 +99,60 @@ static void bf_pio_init(void) {
     sm_config_set_wrap(&c, OFF_RECV, OFF_RECV + 11);
     pio_sm_init(BF_PIO, SM_RECV, OFF_RECV, &c);
 
+    pio_sm_claim(BF_PIO, SM_FEED);
+    BF_PIO->instr_mem[OFF_FEED + 0] = pio_encode_pull(false, true);
+    BF_PIO->instr_mem[OFF_FEED + 1] =
+        pio_encode_wait_gpio(true, TT_PIN_PROJ_CLK - 16);
+    BF_PIO->instr_mem[OFF_FEED + 2] =
+        pio_encode_wait_gpio(false, TT_PIN_PROJ_CLK - 16);
+    BF_PIO->instr_mem[OFF_FEED + 3] = pio_encode_set(pio_pins, 1);
+    BF_PIO->instr_mem[OFF_FEED + 4] =
+        pio_encode_wait_gpio(true, TT_PIN_PROJ_CLK - 16);
+    BF_PIO->instr_mem[OFF_FEED + 5] =
+        pio_encode_wait_gpio(false, TT_PIN_PROJ_CLK - 16);
+    BF_PIO->instr_mem[OFF_FEED + 6] = pio_encode_set(pio_pins, 0);
+    BF_PIO->instr_mem[OFF_FEED + 7] = pio_encode_push(false, true);
+
+    c = pio_get_default_sm_config();
+    sm_config_set_set_pins(&c, PIN_INSTR_VALID, 1);
+    sm_config_set_wrap(&c, OFF_FEED, OFF_FEED + 7);
+    pio_sm_init(BF_PIO, SM_FEED, OFF_FEED, &c);
+    pio_sm_set_consecutive_pindirs(BF_PIO, SM_FEED, PIN_INSTR_VALID, 1,
+                                   true);
+    pio_sm_exec(BF_PIO, SM_FEED, pio_encode_set(pio_pins, 0));
+
     pio_ready = true;
 }
 
-/* Reset the machine to its entry with empty FIFO and shift state,
- * then enable. Call at session start; a machine left mid-frame by
- * a died session realigns here. */
+/* Reset one machine to its entry with empty FIFOs and shift state,
+ * then enable. A machine left mid-pass by a died session realigns
+ * here. */
+static void sm_reset(uint sm, uint entry) {
+    pio_sm_set_enabled(BF_PIO, sm, false);
+    pio_sm_clear_fifos(BF_PIO, sm);
+    pio_sm_restart(BF_PIO, sm);
+    if (sm == SM_FEED) /* restart keeps pin latches: force it low */
+        pio_sm_exec(BF_PIO, sm, pio_encode_set(pio_pins, 0));
+    pio_sm_exec(BF_PIO, sm, pio_encode_jmp(entry));
+    pio_sm_set_enabled(BF_PIO, sm, true);
+}
+
 void bf_pio_arm(void) {
     bf_pio_init();
-    pio_sm_set_enabled(BF_PIO, SM_RECV, false);
-    pio_sm_clear_fifos(BF_PIO, SM_RECV);
-    pio_sm_restart(BF_PIO, SM_RECV);
-    pio_sm_exec(BF_PIO, SM_RECV, pio_encode_jmp(OFF_RECV));
-    pio_sm_set_enabled(BF_PIO, SM_RECV, true);
+    /* pins_safe() gave instr_valid back to SIO; take it again. The
+     * machine's pin latch is low, so the pad stays low across the
+     * handover. */
+    pio_gpio_init(BF_PIO, PIN_INSTR_VALID);
+    sm_reset(SM_RECV, OFF_RECV);
+    sm_reset(SM_FEED, OFF_FEED);
 }
 
 void bf_pio_idle(void) {
     if (!pio_ready)
         return;
     pio_sm_set_enabled(BF_PIO, SM_RECV, false);
+    pio_sm_set_enabled(BF_PIO, SM_FEED, false);
+    pio_sm_exec(BF_PIO, SM_FEED, pio_encode_set(pio_pins, 0));
 }
 
 int bf_pio_recv_frame(uint32_t timeout_us) {
@@ -104,4 +162,16 @@ int bf_pio_recv_frame(uint32_t timeout_us) {
             return -1;
     }
     return (int)(pio_sm_get(BF_PIO, SM_RECV) & 0x3FF);
+}
+
+void bf_pio_feed(void) {
+    pio_sm_put(BF_PIO, SM_FEED, 1);
+    absolute_time_t dl = make_timeout_time_us(FEED_TIMEOUT_US);
+    while (pio_sm_is_rx_fifo_empty(BF_PIO, SM_FEED)) {
+        if (time_reached(dl)) {
+            sm_reset(SM_FEED, OFF_FEED);
+            return;
+        }
+    }
+    (void)pio_sm_get(BF_PIO, SM_FEED); /* completion token */
 }
