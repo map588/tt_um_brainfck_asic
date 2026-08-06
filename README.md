@@ -2,15 +2,26 @@
 
 # Tiny Tapeout Brainf*ck ASIC
 
-- [Read the documentation for project](docs/info.md)
+- [Project datasheet](docs/info.md)
 - [RP2350 host firmware](firmware/README.md)
+- [bf-explorer TUI](explorer/README.md)
 
-## Silicon status (ttsky25b, 2026-08-01)
+## Run it
 
-The chip runs Brainfuck programs on real silicon. "Hello World!"
-completes at a 200 kHz project clock. The compute core is correct.
-Four interface bugs exist in the taped-out RTL. The host firmware
-compensates for all four, so no program change is necessary.
+Flash `tt_host.uf2` from the Releases page onto the demo board.
+Then either run the TUI (`uv sync && uv run bf-explorer` in
+[explorer/](explorer/)), or use a bare serial terminal: `design 448`,
+`freq 200000`, then `bf` and paste a program that ends with `!`.
+
+## Silicon status (ttsky25b)
+
+The chip runs Brainfuck programs on real silicon, at project clocks
+from 50 kHz to 2 MHz. The compute core is correct. Four interface
+bugs exist in the taped-out RTL (found 2026-08-01). The host
+firmware compensates for all four, so no program change is
+necessary. One silicon limit does reach the programs: the bracket
+stack holds 7 usable entries, so loops must not nest deeper than 7.
+The loader warns when a program does.
 
 We found the bugs with the firmware's step mode. The host stops the
 project clock, sends single clock pulses, and reads the chip pins

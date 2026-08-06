@@ -31,6 +31,10 @@ and renders engine events as text. The mailbox between them is the
 SIO FIFO plus a shared struct (`include/bf_link.h`). Session output
 bytes go out raw: a 0x0A cell prints as one byte, not CRLF.
 
+The two edge-critical handshakes run on PIO state machines
+(`src/bf_pio.c`): one samples the ASIC to MCU serial frames, and
+one shapes the `instr_valid` pulse. Neither depends on CPU timing.
+
 `src/spi_ram.c` (the SPI RAM tape slave core 1 ran before it became
 the engine) stays in the tree as reference and is not built: the
 on-chip SPI path never completes a transaction on this silicon (bug
@@ -40,7 +44,8 @@ on-chip SPI path never completes a transaction on this silicon (bug
 
 Four RTL bugs were found on ttsky25b silicon (2026-08-01) by RTL
 analysis plus step-mode pin traces. All four are worked around in
-`src/bf_run.c`, and `Hello World!` runs on the chip.
+`src/bf_run.c`, and the full test suite passes on the chip at every
+clock from 50 kHz to 2 MHz.
 
 1. **SPI cache refill never completes.** `STATE_SPI_WRITE/FETCH` in
    `bf_asic.v` re-issues its transaction forever: `transfer_done` and
@@ -67,9 +72,13 @@ analysis plus step-mode pin traces. All four are worked around in
    hello-world). *Workaround:* logical cell L maps to physical L for
    L < 4 and L + 1 for L ≥ 4; cell 4 is transit-only.
 
-Separate MCU-side limit: the host's bit-banged sampling of the
-ASIC→MCU link bit-slips at ASIC clocks ≥ 500 kHz. 200 kHz and below
-is fully reliable, which is why the TUI sets 200 kHz for BF runs.
+MCU-side timing: the ASIC to MCU frame sampling and the
+`instr_valid` pulse run on PIO state machines (`src/bf_pio.c`), so
+neither depends on CPU timing. The MCU to ASIC send path stays
+bit-banged, because the MCU paces that link and every phase has
+margin by construction. Sessions accept 50 kHz to 2 MHz, the range
+validated on silicon. At 2 MHz, output-dense programs run about
+three times faster than at 200 kHz.
 
 ## tt_host command protocol
 
@@ -90,6 +99,8 @@ communicates over this protocol, and a bare terminal (`tio`,
 | `ui <hh>` / `ui off` / `ui` | drive ui_in, release it for the DIP switches / PMOD, or read the pad levels |
 | `uo` / `uio` | read uo_out / uio pad levels (hex byte) |
 | `uiod [hh]` / `uiow <hh>` | uio direction mask (1 = MCU drives) / output latch |
+| `trace <n>` | kit command: capture n samples (16..4096) of all 24 project pins, one per clock rising edge, as `# t` info lines |
+| `bootwhy` | kit command: why the chip last reset, decoded from POWMAN |
 | `bf` | interactive BF session (BF design + running clock required) |
 | `bfdbg` | BF debugger: same program load, then `n` = one instruction, `c` = run to the next breakpoint or the end, `b<index>` = toggle a breakpoint on a program index, `q` = stop. A `# dbg` state line (pc, next op, pointer, cell, bracket stack) follows each step. |
 
@@ -122,8 +133,8 @@ Configuration knobs:
 | Define | Where | Default | Notes |
 |---|---|---|---|
 | `BF_DESIGN_ADDR` | `include/bf_pins.h` | 448 | tt_um_brainfck_asic mux slot on ttsky25b. The FPGA sim ignores the mux. |
-| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz / 2 MHz | `bf` refuses to run outside this window (bit-banged handshake limits). |
-| `MAX_OPS` | `src/bf_run.c` | 1024 | Program size cap. The ASIC PC is 10 bits. |
+| `BF_MIN_HZ` / `BF_MAX_HZ` | `src/bf_ext.c` | 50 kHz / 2 MHz | `bf` refuses to run outside this window (the range validated on silicon). |
+| `BF_MAX_OPS` | `include/bf_link.h` | 1024 | Program size cap. The ASIC PC is 10 bits. |
 
 For the v3 *Alpha* prototype board add `-DTT_DBV3_ALPHA` (different GPIO
 map, see the kit tt_pins.h and `include/bf_pins.h`).
@@ -132,9 +143,9 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
 
 1. **`instr_valid` width is critical.** The core executes on *every*
    rising clock edge where `instr_valid` is high, so a pulse wider than
-   one clock period double-executes. The firmware owns the clock and
-   raises/drops the pulse between two consecutive falling edges, so
-   exactly one rising edge samples it high.
+   one clock period double-executes. A PIO state machine raises and
+   drops the pulse between two consecutive falling edges of the
+   project clock, so exactly one rising edge samples it high.
 
 2. **SPI cache refills are invisible.** `irq_cache_pulse` exists in
    `bf_asic.v` but is never set, so a `<`/`>` that crosses the cache
@@ -171,3 +182,14 @@ map, see the kit tt_pins.h and `include/bf_pins.h`).
    matching `]` (not one past it): executing that `]` with data==0
    pops the placeholder. The firmware's match table does exactly
    this.
+
+6. **Reset must be verified.** A single reset pulse intermittently
+   leaves stale PC or DATA behind. The firmware pulses reset, reads
+   PC and DATA back through inspect, and repeats until both are
+   zero, then lets a few quiet clocks pass before the first feed.
+
+7. **The inspect pads are asynchronous.** They switch on the ASIC's
+   rising clock edge while the MCU polls at its own pace, so a
+   single read can catch a mid-transition value. The firmware
+   accepts a value only when a second read about 200 ns later
+   agrees.
