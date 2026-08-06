@@ -125,8 +125,11 @@ class BfExplorerApp(TTExplorerApp):
 
     # -- session end and readiness watcher --
 
+    # Textual runs the handler of EVERY class in the MRO, so the
+    # kit's on_mount (connect, poll timer) runs on its own. A super()
+    # call here would run it twice: two serial links on one port
+    # steal each other's replies and every command times out.
     async def on_mount(self) -> None:
-        await super().on_mount()
         self.set_interval(0.25, self._bf_tick)
 
     async def _bf_tick(self) -> None:
@@ -291,7 +294,11 @@ class BfExplorerApp(TTExplorerApp):
         panel.show_result(ok, detail)
         await self._refresh_status()
 
-    # -- UI events: bf ids here, everything else to the kit --
+    # -- UI events --
+    #
+    # Only the bf-* ids are handled here. Textual dispatches the
+    # kit's own handlers separately (see on_mount), so there is no
+    # super() call: with one, a kit button would act twice.
 
     async def on_button_pressed(self, event) -> None:
         bid = event.button.id or ""
@@ -330,8 +337,6 @@ class BfExplorerApp(TTExplorerApp):
             panel.show_breaks(self._bf_breaks)
             if self._bf_active and self._bf_debug:
                 panel.show_view(self._bf_pc, self._bf_breaks)
-        else:
-            await super().on_button_pressed(event)
 
     async def on_input_submitted(self, event) -> None:
         if event.input.id == "bf-stdin":
@@ -339,8 +344,6 @@ class BfExplorerApp(TTExplorerApp):
                 self.link.write_raw(event.value)
                 event.input.value = ""
                 self._bf_input_sent()
-            return
-        await super().on_input_submitted(event)
 
 
 def main() -> None:
