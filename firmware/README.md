@@ -96,8 +96,10 @@ communicates over this protocol, and a bare terminal (`tio`,
 A `bf` session needs `design 448` and a running clock first. Paste
 BF source and end with `!`. Anything that is not one of the eight
 BF ops is a comment. Anything after the `!` is consumed as `,`
-input by the running program. Two control bytes work during a
-session: Ctrl-D is end of input, so the next `,` reads 0. Ctrl-C
+input by the running program. When `,` waits and no input has
+arrived yet, the firmware prints `# input?` on its own line, so the
+host can show that the program waits. Two control bytes work during
+a session: Ctrl-D is end of input, so the next `,` reads 0. Ctrl-C
 stops the session with `err stopped`.
 
 ## Build

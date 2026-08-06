@@ -191,6 +191,10 @@ static const char *pump(void) {
             case BF_EV_DBG_QUIT:
                 printf("# dbg stopped by host\n");
                 break;
+            case BF_EV_IN_WAIT:
+                /* Own line: '.' output may sit mid-line before it. */
+                printf("\n# input?\n");
+                break;
             case BF_EV_HALTED:
                 printf("\n# halted: %lu instructions executed\n",
                        (unsigned long)bf_shared.executed);

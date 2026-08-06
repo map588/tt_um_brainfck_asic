@@ -48,6 +48,7 @@ enum {
     BF_EV_STOPPED,   /* run ended by CH_STOP */
     BF_EV_DBG_QUIT,  /* debugger ended by 'q' or CH_STOP */
     BF_EV_HALTED,    /* program ran to the end, executed valid */
+    BF_EV_IN_WAIT,   /* ',' blocks on an empty input ring */
     BF_EV_END,       /* session over, arg = bf_result_t */
 };
 

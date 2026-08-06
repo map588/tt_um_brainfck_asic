@@ -19,13 +19,21 @@ uv run bf-explorer --port /dev/tty.usbmodemXXXX
 The kit tabs come as-is: "Projects" (shuttle browser), "Bench"
 (clock, pin rows, serial console), and "Signals" (per-clock-edge
 waveform capture). The "BF" tab is the program tab for the
-Brainf*ck ASIC: type or paste a program, press Run, feed ',' input
-through the field beside it, or press Debug to step the program one
-instruction at a time with live pc / cell / bracket-stack state
-between steps. "End input" makes the next ',' read 0, so programs
-that read until zero can finish. "Stop" ends a stuck or endless run
-at any time. "Break @ cursor" toggles a breakpoint on the op under
-the editor cursor.
+Brainf*ck ASIC. A banner at the top loads the BF design when a
+different design is active. One status line tracks the session:
+idle, running (with the clock and the elapsed time), waiting for
+',' input (the input field gets focus), and then a result line
+with the instruction count and the rate. Only the controls that
+act in the current state are visible: Run and Debug while idle,
+Stop, "End input", and the input field while a program runs.
+"End input" makes the next ',' read 0, so programs that read until
+zero can finish. "Break @ cursor" toggles a breakpoint on the op
+under the editor cursor before a Debug session starts. During
+Debug, a read-only view of the program replaces the editor: green
+marks the next op, red marks a breakpoint, and a state line shows
+pc, cell, and bracket-stack details after each step. While a
+session runs, the Bench and Signals tabs freeze and their tab
+labels say so.
 
 While the BF design is loaded, the pins its firmware host owns are
 locked on the Bench (ui0-5 and all uio pins); inspect_sel (ui6/7)

@@ -98,8 +98,11 @@ static void __attribute__((noreturn)) stop_run(void);
 static void __attribute__((noreturn)) lost_host(void);
 
 /* One input byte for ',' or a debugger key. Blocks until a byte
- * arrives, the host asks for a stop, or the host disconnects. */
-static int in_wait(void) {
+ * arrives, the host asks for a stop, or the host disconnects. With
+ * announce set, an empty ring pushes BF_EV_IN_WAIT once, so the
+ * host can show that the program waits for input. The debugger key
+ * prompt does not announce: only ',' is a real input wait. */
+static int in_wait(bool announce) {
     for (;;) {
         if (bf_shared.stop_req)
             return -1;
@@ -108,6 +111,10 @@ static int in_wait(void) {
         int c = bf_in_get();
         if (c >= 0)
             return c;
+        if (announce) {
+            ev_push(BF_EV_IN_WAIT, 0);
+            announce = false;
+        }
         tight_loop_contents();
     }
 }
@@ -528,7 +535,7 @@ static inline void exec_one(bf_state_t *s) {
             s->executed++;
             if (await_pc_or_irq(anext, PIN_IRQ_IO, PC_TIMEOUT_US) != EV_IRQ)
                 die("no interrupt_io for ','", s->pc);
-            int c = in_wait();
+            int c = in_wait(true);
             if (c == -1)
                 stop_run();
             if (c == -2)
@@ -682,7 +689,7 @@ static bf_result_t engine_debug(void) {
     ev_push(BF_EV_DBG_READY, 0);
     dbg_state(&st);
     while (st.pc < bf_n_ops) {
-        int ch = in_wait();
+        int ch = in_wait(false);
         if (ch == -2) {
             gpio_put(TT_PIN_LED, 0);
             return BF_RES_HOST_LOST;
